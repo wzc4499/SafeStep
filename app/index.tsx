@@ -1,8 +1,9 @@
-import React, { useState, useEffect, useRef } from 'react';
-import { StyleSheet, Text, View, Dimensions, TouchableOpacity, Switch } from 'react-native';
+import { BlurView } from 'expo-blur';
 import { CameraView, useCameraPermissions } from 'expo-camera';
-import * as Location from 'expo-location';
 import * as Haptics from 'expo-haptics';
+import * as Location from 'expo-location';
+import React, { useEffect, useRef, useState } from 'react';
+import { Dimensions, StyleSheet, Switch, Text, TouchableOpacity, View } from 'react-native';
 
 const { width: SCREEN_WIDTH, height: SCREEN_HEIGHT } = Dimensions.get('window');
 
@@ -15,29 +16,22 @@ interface DetectedObject {
 
 export default function App() {
   const [permission, requestPermission] = useCameraPermissions();
-  const [speed, setSpeed] = useState<number>(0);
-  const [isTestMode, setIsTestMode] = useState(false); // 切換測試模式
+  const [isTestMode, setIsTestMode] = useState(false);
   const [detectedObjects, setDetectedObjects] = useState<DetectedObject[]>([]);
-  const [isRecording, setIsRecording] = useState(true); // 模擬錄影紅點
+  const [isRecording, setIsRecording] = useState(true);
   const testInterval = useRef<NodeJS.Timeout | null>(null);
 
   useEffect(() => {
-    // 錄影點閃爍效果
     const blink = setInterval(() => setIsRecording(prev => !prev), 1000);
     
     (async () => {
       await requestPermission();
-      const { status } = await Location.requestForegroundPermissionsAsync();
-      if (status === 'granted') {
-        Location.watchPositionAsync({ accuracy: Location.Accuracy.BestForNavigation }, (loc) => {
-          setSpeed(loc.coords.speed && loc.coords.speed > 0 ? loc.coords.speed : 0);
-        });
-      }
+      // 雖然不顯示速度，但保留權限請求以供未來碰撞偵測使用 [cite: 6]
+      await Location.requestForegroundPermissionsAsync();
     })();
     return () => clearInterval(blink);
   }, []);
 
-  // 測試模式邏輯：模擬隨機出現的物件 [cite: 8, 9]
   useEffect(() => {
     if (isTestMode) {
       testInterval.current = setInterval(() => {
@@ -46,7 +40,6 @@ export default function App() {
           { id: 2, label: 'Pedestrian', x: 0.7, y: 0.3, w: 0.1, h: 0.5, ttc: 8 }
         ];
         setDetectedObjects(fakeData);
-        // 若有高危險物件則震動 [cite: 4, 7]
         if (fakeData.some(o => o.ttc < 2)) Haptics.notificationAsync(Haptics.NotificationFeedbackType.Error);
       }, 1000);
     } else {
@@ -56,45 +49,57 @@ export default function App() {
     return () => { if (testInterval.current) clearInterval(testInterval.current); };
   }, [isTestMode]);
 
-  if (!permission?.granted) return <View style={styles.center}><TouchableOpacity onPress={requestPermission} style={styles.btn}><Text style={{color:'white'}}>取得權限</Text></TouchableOpacity></View>;
+  const getDisplayName = (label: string) => {
+    if (label === 'Car') return '前方車輛';
+    if (label === 'Pedestrian') return '行人';
+    return label;
+  };
+
+  const getWarningStyle = (ttc: number) => {
+    if (ttc < 2) return { color: '#FF3B30', text: '危險！即將碰撞', width: 4 };
+    if (ttc < 5) return { color: '#FFCC00', text: `注意：${ttc.toFixed(1)}秒`, width: 3 };
+    return { color: '#4CD964', text: '安全距離', width: 2 };
+  };
+
+  if (!permission?.granted) return <View style={styles.center}><TouchableOpacity onPress={requestPermission} style={styles.btn}><Text style={{color:'white'}}>啟用相機權限</Text></TouchableOpacity></View>;
 
   return (
     <View style={styles.container}>
       <CameraView style={StyleSheet.absoluteFillObject} facing="back">
         
-        {/* AR 繪圖層：座標轉換與顏色編碼 [cite: 3, 16, 17] */}
-        {detectedObjects.map((obj) => (
-          <View key={obj.id} style={[styles.boundingBox, {
-            left: obj.x * SCREEN_WIDTH,
-            top: obj.y * SCREEN_HEIGHT,
-            width: obj.w * SCREEN_WIDTH,
-            height: obj.h * SCREEN_HEIGHT,
-            borderColor: obj.ttc < 2 ? '#FF3B30' : '#4CD964',
-            borderWidth: obj.ttc < 2 ? 4 : 2,
-          }]}>
-            <View style={[styles.labelTag, { backgroundColor: obj.ttc < 2 ? '#FF3B30' : '#4CD964' }]}>
-              <Text style={styles.labelText}>{obj.label} | {obj.ttc.toFixed(1)}s</Text>
+        {detectedObjects.map((obj) => {
+          const warning = getWarningStyle(obj.ttc);
+          return (
+            <View key={obj.id} style={[styles.boundingBox, {
+              left: obj.x * SCREEN_WIDTH,
+              top: obj.y * SCREEN_HEIGHT,
+              width: obj.w * SCREEN_WIDTH,
+              height: obj.h * SCREEN_HEIGHT,
+              borderColor: warning.color,
+              borderWidth: warning.width,
+            }]}>
+              <View style={[styles.labelTag, { backgroundColor: warning.color }]}>
+                <Text style={styles.labelText}>{getDisplayName(obj.label)} | {warning.text}</Text>
+              </View>
             </View>
-          </View>
-        ))}
+          );
+        })}
 
-        {/* 頂部資訊列  */}
         <View style={styles.header}>
           <View style={styles.row}>
             <View style={[styles.dot, { opacity: isRecording ? 1 : 0 }]} />
-            <Text style={styles.headerText}>REC LIVE</Text>
+            <Text style={styles.headerText}>道路監控中</Text>
           </View>
-          <Text style={styles.speedText}>{(speed * 3.6).toFixed(0)} <Text style={{fontSize: 14}}>km/h</Text></Text>
+          {/* 時速顯示已移除 [cite: 1] */}
         </View>
 
-        {/* 底部控制面板 */}
-        <View style={styles.footer}>
+        <BlurView intensity={60} tint="dark" style={styles.footer}>
           <View style={styles.row}>
-            <Text style={{color: 'white', marginRight: 10}}>模擬測試模式</Text>
+            <Text style={{color: 'white', marginRight: 15, fontSize: 16, fontWeight: 'bold'}}>系統模擬環境</Text>
             <Switch value={isTestMode} onValueChange={setIsTestMode} trackColor={{ false: "#767577", true: "#4CD964" }} />
           </View>
-          <Text style={styles.hint}>模式：{isTestMode ? "DEBUG 模擬中" : "待命對接大腦..."}</Text>
-        </View>
+          <Text style={styles.hint}>系統狀態：{isTestMode ? "接收模擬環境訊號中..." : "待命狀態，鏡頭運作正常"}</Text>
+        </BlurView>
 
       </CameraView>
     </View>
@@ -106,13 +111,12 @@ const styles = StyleSheet.create({
   center: { flex: 1, justifyContent: 'center', alignItems: 'center' },
   btn: { backgroundColor: '#007AFF', padding: 15, borderRadius: 10 },
   header: { position: 'absolute', top: 50, left: 20, right: 20, flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center' },
-  headerText: { color: 'white', fontWeight: 'bold', fontSize: 16 },
-  speedText: { color: 'white', fontSize: 42, fontWeight: '900', textShadowColor: 'black', textShadowRadius: 4 },
-  dot: { width: 12, height: 12, borderRadius: 6, backgroundColor: 'red', marginRight: 8 },
+  headerText: { color: 'white', fontWeight: 'bold', fontSize: 16, textShadowColor: 'black', textShadowRadius: 2 },
+  dot: { width: 10, height: 10, borderRadius: 5, backgroundColor: '#FF3B30', marginRight: 8 },
   row: { flexDirection: 'row', alignItems: 'center' },
-  boundingBox: { position: 'absolute' },
-  labelTag: { position: 'absolute', top: -20, left: -2, paddingHorizontal: 6, paddingVertical: 2 },
-  labelText: { color: 'white', fontSize: 10, fontWeight: 'bold' },
-  footer: { position: 'absolute', bottom: 40, left: 20, right: 20, backgroundColor: 'rgba(0,0,0,0.5)', padding: 20, borderRadius: 20, alignItems: 'center' },
-  hint: { color: '#AAA', fontSize: 12, marginTop: 5 }
+  boundingBox: { position: 'absolute', borderRadius: 4 },
+  labelTag: { position: 'absolute', top: -24, left: -2, paddingHorizontal: 8, paddingVertical: 4, borderRadius: 4 },
+  labelText: { color: 'black', fontSize: 12, fontWeight: 'bold' },
+  footer: { position: 'absolute', bottom: 40, left: 20, right: 20, padding: 20, borderRadius: 20, alignItems: 'center', overflow: 'hidden' },
+  hint: { color: '#E0E0E0', fontSize: 12, marginTop: 8 }
 });
