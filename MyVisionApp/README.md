@@ -163,11 +163,3 @@ npx expo start
 
 ---
 
-## 技術堆疊
-
-| 層級 | 技術 |
-|------|------|
-| 前端 | React Native、Expo、TypeScript |
-| 後端 | Python、FastAPI、Uvicorn |
-| 辨識 | YOLOv8（Ultralytics） |
-| 通訊 | HTTP REST API、Base64 圖片傳輸 |

@@ -1,11 +1,11 @@
 {
   "expo": {
-    "name": "vision-app",
-    "slug": "vision-app",
+    "name": "MyVisionApp",
+    "slug": "MyVisionApp",
     "version": "1.0.0",
     "orientation": "portrait",
     "icon": "./assets/images/icon.png",
-    "scheme": "visionapp",
+    "scheme": "myvisionapp",
     "userInterfaceStyle": "automatic",
     "newArchEnabled": true,
     "ios": {
@@ -43,19 +43,6 @@
     "experiments": {
       "typedRoutes": true,
       "reactCompiler": true
-    },
-    "extra": {
-      "router": {},
-      "eas": {
-        "projectId": "a144cd77-30cc-4c05-8efb-7e1cfc90b1a1"
-      }
-    },
-    "owner": "intelligentassistancesystem",
-    "runtimeVersion": {
-      "policy": "appVersion"
-    },
-    "updates": {
-      "url": "https://u.expo.dev/a144cd77-30cc-4c05-8efb-7e1cfc90b1a1"
     }
   }
 }
