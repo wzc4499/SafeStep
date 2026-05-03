@@ -1,12 +1,12 @@
-import io
 import base64
+import json
+import cv2
+import numpy as np
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
-from pydantic import BaseModel
-from ultralytics import YOLO
-from PIL import Image
-import numpy as np
-import json
+
+# 匯入優化後的模組
+import func
 
 app = FastAPI()
 
@@ -17,98 +17,71 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-model = YOLO("runs/detect/Taiwan_Traffic_Project/weights/best.pt")
-
-# 使用 WebSocket 傳輸影像
 @app.websocket("/ws/detect")
-
 async def websocket_detect(websocket: WebSocket):
-    # 1. 接受前端 (Expo Go) 的連線請求
     await websocket.accept()
-    print("手機端成功建立 WebSocket 連線")
+    print("📱 手機端成功建立 WebSocket 連線")
+
+    # 為「這個連線」建立專屬的物件追蹤記憶體，避免多裝置互相干擾
+    client_object_history = {}
 
     try:
-        # 2. 建立無限迴圈，持續接收影像串流
         while True:
-            # 接收前端傳來的資料 (取代原本的 payload: ImagePayload)
             data = await websocket.receive_text()
-
-            # 3. 防呆機制：過濾 Expo 可能自帶的 data:image/jpeg;base64, 前綴
             raw_base64 = data.split(",")[-1] if "," in data else data
 
-            # 解碼與影像轉換 (沿用你原本的精準寫法)
+            # 效能優化：跳過 PIL，直接將 Base64 轉為 OpenCV BGR 格式
             img_bytes = base64.b64decode(raw_base64)
-            img = Image.open(io.BytesIO(img_bytes)).convert("RGB")
-            img_np = np.array(img)
+            np_arr = np.frombuffer(img_bytes, np.uint8)
+            img_np = cv2.imdecode(np_arr, cv2.IMREAD_COLOR)
 
-            # 4. YOLO 推論
-            results = model(img_np, conf=0.5, verbose=False)
+            if img_np is None:
+                continue
 
-            # 解析 Bounding Boxes
-            boxes = []
-            for box in results[0].boxes:
-                x1, y1, x2, y2 = box.xyxy[0].tolist()
-                conf = float(box.conf[0])
-                cls = int(box.cls[0])
-                label = model.names[cls]
-                boxes.append({
-                    "x1": x1, "y1": y1,
-                    "x2": x2, "y2": y2,
-                    "confidence": round(conf, 2),
-                    "label": label
+            img_height, img_width = img_np.shape[:2]
+
+            # 1. 執行 YOLO 辨識
+            _, detected_items = func.VisionProcessor.detect_objects(img_np)
+
+            # 2. 進行危險評估與排序 (傳入該連線專屬的歷史記憶體)
+            analyzed_items = func.RiskEvaluator.evaluate_frame_risk(
+                detected_items,
+                img_height,
+                client_object_history
+            )
+
+            # 3. 整理回傳格式
+            response_boxes = []
+            for item in analyzed_items:
+                x1, y1, x2, y2 = item["bbox"]
+                label = func.VisionProcessor.get_label_name(item["class_id"])
+
+                response_boxes.append({
+                    "track_id": item["track_id"],
+                    "label": label,
+                    "confidence": round(item["confidence"], 2),
+                    "risk_score": round(item["risk_score"], 2),
+                    "x1": round(x1, 2),
+                    "y1": round(y1, 2),
+                    "x2": round(x2, 2),
+                    "y2": round(y2, 2)
                 })
 
-            # 結果打包 JSON 字串並回傳手機
+            # 4. 回傳前端
             response_data = {
-                "boxes": boxes,
-                "img_width": int(img_np.shape[1]),
-                "img_height": int(img_np.shape[0])
+                "boxes": response_boxes,
+                "img_width": img_width,
+                "img_height": img_height
             }
             await websocket.send_text(json.dumps(response_data))
 
     except WebSocketDisconnect:
-        # 當手機端關閉 App 或斷網時，安全地捕捉斷線事件
-        print("Error: 手機端連線已中斷")
+        print("⚠️ 手機端連線已中斷")
+        # 由於 client_object_history 是區域變數，斷線後會自動被 Python 垃圾回收機制清掉，無須手動 clear
+
     except Exception as e:
-        print(f"warning: 處理影像時發生錯誤: {e}")
+        print(f"❌ 處理影像時發生錯誤: {e}")
 
 @app.get("/")
 async def root():
     return {"status": "server is running"}
-
-# 以下為 Http 協定
-# ------------------------------------------------------------------------------------------------------
-# class ImagePayload(BaseModel):
-#     image: str
-
-# @app.post("/detect")
-# async def detect(payload: ImagePayload):
-#     img_bytes = base64.b64decode(payload.image)
-#     img = Image.open(io.BytesIO(img_bytes)).convert("RGB")
-#     img_np = np.array(img)
-
-#     results = model(img_np, conf=0.5)
-
-#     boxes = []
-#     for box in results[0].boxes:
-#         x1, y1, x2, y2 = box.xyxy[0].tolist()
-#         conf = float(box.conf[0])
-#         cls = int(box.cls[0])
-#         label = model.names[cls]
-#         boxes.append({
-#             "x1": x1, "y1": y1,
-#             "x2": x2, "y2": y2,
-#             "confidence": round(conf, 2),
-#             "label": label
-#         })
-
-#     return {
-#         "boxes": boxes,
-#         "img_width": int(img_np.shape[1]),
-#         "img_height": int(img_np.shape[0])
-#     }
-
-# @app.get("/")
-# async def root():
-#     return {"status": "server is running"}
-
