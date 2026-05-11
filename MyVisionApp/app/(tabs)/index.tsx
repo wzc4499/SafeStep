@@ -37,15 +37,11 @@ export default function App() {
   const [permission, requestPermission] = useCameraPermissions();
   // 儲存當前畫面偵測到的所有物件框
   const [boxes, setBoxes] = useState<Box[]>([]);
-<<<<<<< HEAD
-  const [imgSize, setImgSize] = useState({ w: 1080, h: 1772 });
-=======
 
   // 儲存後端回傳的原始影像尺寸，用於將辨識框精準映射到手機螢幕上
   const [imgSize, setImgSize] = useState({ w: 1772, h: 1080 });
 
   // 控制是否正在執行辨識的開關
->>>>>>> f0d98e0205e5fd9aa7f20e98e913b105622bddd6
   const [isDetecting, setIsDetecting] = useState(false);
 
   // 顯示當前系統狀態的提示文字
@@ -76,37 +72,6 @@ export default function App() {
 
 // --- 核心功能：開始辨識 (改用 WebSocket) ---
   const startDetection = () => {
-<<<<<<< HEAD
-    setIsDetecting(true);
-    setStatus('辨識中...');
-    intervalRef.current = setInterval(async () => {
-      try {
-        if (!cameraRef.current) return;
-        const photo = await cameraRef.current.takePictureAsync({
-          base64: true,
-          quality: 0.6,
-          skipProcessing: true,
-        });
-        if (!photo?.base64) return;
-
-        const res = await fetch(SERVER_URL, {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ image: photo.base64 }),
-        });
-        const data: DetectResponse = await res.json();
-        setBoxes(data.boxes || []);
-        setImgSize({ w: data.img_width, h: data.img_height });
-
-        const highDanger = data.boxes?.filter(b => b.danger === '高').length || 0;
-        if (highDanger > 0) {
-          setStatus(`⚠️ 危險！${highDanger} 個高危險物件`);
-        } else {
-          setStatus(`偵測到 ${data.boxes?.length || 0} 個物件`);
-        }
-      } catch (e) {
-        setStatus('連線錯誤，確認 WiFi');
-=======
     if (!activeMode) return;
 
     setIsDetecting(true);
@@ -155,7 +120,6 @@ export default function App() {
       if (data.alerts && data.alerts.length > 0) {
         console.warn(`🚨 警報: ${data.alerts[0].warning_msg}`);
         // 這裡可以加入震動 API: Vibration.vibrate(500);
->>>>>>> f0d98e0205e5fd9aa7f20e98e913b105622bddd6
       }
     };
 
@@ -247,36 +211,9 @@ const stopDetection = (customMessage = '已停止') => {
         <Text style={styles.statusText}>{status}</Text>
       </View>
 
-<<<<<<< HEAD
-      {/* 物件清單 */}
-      <ScrollView style={styles.listArea}>
-        {boxes.length === 0 && isDetecting && (
-          <Text style={styles.emptyText}>未偵測到物件</Text>
-        )}
-        {boxes.map((box, i) => {
-          const color = DANGER_COLOR[box.danger] || '#00cc66';
-          return (
-            <View key={i} style={[styles.listItem, { borderLeftColor: color }]}>
-              <View style={{ flex: 1 }}>
-                <Text style={styles.listLabel}>{box.label}</Text>
-                <Text style={styles.listSub}>
-                  信心度 {Math.round(box.confidence * 100)}%　
-                  距離約 {box.distance}m
-                </Text>
-              </View>
-              <View style={[styles.dangerBadge, { backgroundColor: color }]}>
-                <Text style={styles.dangerText}>危險值 {box.danger}</Text>
-              </View>
-            </View>
-          );
-        })}
-      </ScrollView>
-
-      {/* 按鈕 */}
-=======
       {/* 底部控制按鈕區 */}
->>>>>>> f0d98e0205e5fd9aa7f20e98e913b105622bddd6
-      <View style={styles.controls}>
+      {/* 原本 : <View style={styles.controls}> */}
+      <View style={(styles as any).controls}>
         {/* 開始/停止 辨識按鈕 */}
         <TouchableOpacity
           style={[styles.button, isDetecting && styles.buttonStop]} // 若正在辨識，套用紅色樣式
@@ -351,31 +288,9 @@ const styles = StyleSheet.create({
     fontSize: 13,
   },
   listItem: {
-    flexDirection: 'row',
     alignItems: 'center',
-<<<<<<< HEAD
-    backgroundColor: '#222',
-    borderRadius: 8,
-    borderLeftWidth: 4,
-    padding: 10,
-    marginBottom: 6,
-  },
-  listLabel: { color: '#fff', fontSize: 15, fontWeight: '600' },
-  listSub: { color: '#aaa', fontSize: 12, marginTop: 2 },
-  dangerBadge: {
-    borderRadius: 6,
-    paddingHorizontal: 8,
-    paddingVertical: 4,
-  },
-  dangerText: { color: '#fff', fontSize: 12, fontWeight: '700' },
-  controls: {
-    padding: 16,
-    alignItems: 'center',
-    backgroundColor: '#111',
-=======
     flexDirection: 'row', // 將按鈕橫向並排
     justifyContent: 'space-evenly', // 平均分配按鈕間距
->>>>>>> f0d98e0205e5fd9aa7f20e98e913b105622bddd6
   },
 
   // 按鈕樣式
@@ -385,14 +300,6 @@ const styles = StyleSheet.create({
     paddingHorizontal: 30,
     borderRadius: 30,
   },
-<<<<<<< HEAD
-  buttonStop: { backgroundColor: '#ff4444' },
-  buttonText: { fontSize: 16, fontWeight: '600', color: '#111' },
-  box: {
-    position: 'absolute',
-    borderWidth: 2,
-    borderRadius: 4,
-=======
   buttonStop: { backgroundColor: '#ff4444' }, // 停止辨識時的紅色按鈕
   buttonDarkText: { fontSize: 16, fontWeight: '700', color: '#000' },
   exitButton: {
@@ -411,7 +318,6 @@ const styles = StyleSheet.create({
     borderWidth: 2,
     borderColor: '#00ff00', // 螢光綠外框
     backgroundColor: 'rgba(0,255,0,0.1)', // 半透明綠色填充
->>>>>>> f0d98e0205e5fd9aa7f20e98e913b105622bddd6
   },
   boxLabel: {
     color: '#000',
