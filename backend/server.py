@@ -1,11 +1,21 @@
-import io
 import base64
+<<<<<<< HEAD
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from ultralytics import YOLO
 from PIL import Image, ImageOps
+=======
+import json
+import cv2
+>>>>>>> f0d98e0205e5fd9aa7f20e98e913b105622bddd6
 import numpy as np
+import heapq  # 新增：用於處理優先權佇列
+from fastapi import FastAPI, WebSocket, WebSocketDisconnect
+from fastapi.middleware.cors import CORSMiddleware
+
+# 匯入優化後的模組
+import func
 
 app = FastAPI()
 
@@ -16,7 +26,10 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-model = YOLO("runs/detect/Taiwan_Traffic_Project/weights/best.pt")
+@app.websocket("/ws/detect")
+async def websocket_detect(websocket: WebSocket):
+    await websocket.accept()
+    print("📱 手機端成功建立 WebSocket 連線")
 
 LABEL_ZH = {
     'obstacle': '障礙物',
