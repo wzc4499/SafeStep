@@ -1,21 +1,11 @@
+import io
 import base64
-<<<<<<< HEAD
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from ultralytics import YOLO
 from PIL import Image, ImageOps
-=======
-import json
-import cv2
->>>>>>> f0d98e0205e5fd9aa7f20e98e913b105622bddd6
 import numpy as np
-import heapq  # 新增：用於處理優先權佇列
-from fastapi import FastAPI, WebSocket, WebSocketDisconnect
-from fastapi.middleware.cors import CORSMiddleware
-
-# 匯入優化後的模組
-import func
 
 app = FastAPI()
 
@@ -26,10 +16,7 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-@app.websocket("/ws/detect")
-async def websocket_detect(websocket: WebSocket):
-    await websocket.accept()
-    print("📱 手機端成功建立 WebSocket 連線")
+model = YOLO("runs/detect/Taiwan_Traffic_Project/weights/best.pt")
 
 LABEL_ZH = {
     'obstacle': '障礙物',
@@ -49,13 +36,16 @@ def estimate_danger(x1, y1, x2, y2, img_w, img_h):
     box_area = (x2 - x1) * (y2 - y1)
     img_area = img_w * img_h
     ratio = box_area / img_area
+    danger_pct = round(ratio * 100, 1)
 
     if ratio > 0.25:
-        return "高", ratio
+        level = "高"
     elif ratio > 0.08:
-        return "中", ratio
+        level = "中"
     else:
-        return "低", ratio
+        level = "低"
+
+    return level, ratio, danger_pct
 
 @app.post("/detect")
 async def detect(payload: ImagePayload):
@@ -76,7 +66,9 @@ async def detect(payload: ImagePayload):
         label_en = model.names[cls]
         label = LABEL_ZH.get(label_en, label_en)
 
-        danger_level, area_ratio = estimate_danger(x1, y1, x2, y2, img_w, img_h)
+        danger_level, area_ratio, danger_pct = estimate_danger(
+            x1, y1, x2, y2, img_w, img_h
+        )
         estimated_distance = round(1.0 / (area_ratio + 0.01) * 0.5, 1)
         estimated_distance = min(estimated_distance, 99.9)
 
@@ -86,11 +78,10 @@ async def detect(payload: ImagePayload):
             "confidence": round(conf, 2),
             "label": label,
             "danger": danger_level,
+            "danger_pct": danger_pct,
             "distance": estimated_distance,
+            "area_ratio": round(area_ratio, 4),
         })
-
-    danger_order = {"高": 0, "中": 1, "低": 2}
-    boxes.sort(key=lambda b: danger_order[b["danger"]])
 
     return {
         "boxes": boxes,
