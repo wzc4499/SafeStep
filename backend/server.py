@@ -1,11 +1,25 @@
 import io
 import base64
+<<<<<<< HEAD
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from ultralytics import YOLO
 from PIL import Image, ImageOps
 import numpy as np
+=======
+import json
+from tkinter import Image
+import cv2
+import numpy as np
+import heapq  # 新增：用於處理優先權佇列
+from fastapi import FastAPI, WebSocket, WebSocketDisconnect
+from fastapi.middleware.cors import CORSMiddleware
+from pydantic import BaseModel
+
+# 匯入優化後的模組
+import func
+>>>>>>> 72cbd4c4435145046dcc4ed9df59589edadbc36c
 
 app = FastAPI()
 
