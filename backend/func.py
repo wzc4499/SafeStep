@@ -4,6 +4,12 @@ import os
 from ultralytics import YOLO
 import heapq
 
+import matplotlib.pyplot as plt
+import matplotlib.image as mpimg
+import glob
+from moviepy import VideoFileClip # 注意這裡從 moviepy 改用 moviepy.editor
+from IPython.display import HTML
+
 # 流程控制 (輔助邏輯系統) --------------------------------------------------------
 class RiskEvaluator:
     # 基礎危險權重 (拉到類別層級，避免每幀重複建立)
@@ -40,7 +46,7 @@ class RiskEvaluator:
 
     @staticmethod
     # -- 危險性評估 --
-    def evaluate_frame_risk(detected_items, image_height, history_dict, mode="pedestrian"):
+    def evaluate_frame_risk(detected_items, image_width, image_height, history_dict, mode="pedestrian"):
         """處理單幀所有物件，計算危險度並回傳排序後的列表與警報佇列"""
         analyzed_items = []
         current_frame_ids = set()
@@ -49,9 +55,31 @@ class RiskEvaluator:
         for item in detected_items:
             track_id = item["track_id"]
             cls_id = item["class_id"]
-            y2 = item["bbox"][3]
+            x1, y1, x2, y2 = item["bbox"]
 
             current_frame_ids.add(track_id)
+
+            # --- 新增的面積比例與距離估算邏輯 (整合至此) ---
+            box_area = (x2 - x1) * (y2 - y1)
+            img_area = image_width * image_height
+            area_ratio = box_area / img_area if img_area > 0 else 0
+            danger_pct = round(area_ratio * 100, 1)
+
+            if area_ratio > 0.25:
+                danger_level = "高"
+            elif area_ratio > 0.08:
+                danger_level = "中"
+            else:
+                danger_level = "低"
+
+            estimated_distance = round(1.0 / (area_ratio + 0.01) * 0.5, 1)
+            estimated_distance = min(estimated_distance, 99.9)
+
+            item["danger_level"] = danger_level
+            item["area_ratio"] = round(area_ratio, 4)
+            item["danger_pct"] = danger_pct
+            item["distance"] = estimated_distance
+            # ---------------------------------------------
 
             # 主指標：物理動態評估 (滿分 80 分)
 
@@ -79,7 +107,7 @@ class RiskEvaluator:
                     speed_score = 0.0
             #　模式邏輯 : 機車模式
             elif mode == "motorcycle":
-                # 
+                #
                 approach_speed = RiskEvaluator.calculate_relative_speed(track_id, y2, history_dict)
                 if approach_speed < 0:
                     speed_score = 0.0
@@ -122,6 +150,50 @@ class VisionProcessor:
 
     yolo_model = YOLO(MODEL_PATH)
 
+    # === [修復] 建立類別變數來快取校正矩陣，避免每幀重複計算 ===
+    _mtx = None
+    _dist = None
+
+    @classmethod
+    def initialize_camera_calibration(cls):
+        """初始化相機校正，確保整個程式生命週期只執行一次"""
+        if cls._mtx is not None:
+            return # 已經校正過，直接返回
+
+        print("正在進行相機校正，請稍候...")
+        # 將絕對路徑改為相對路徑，增加程式在不同電腦上的可移植性
+        # 如果你必須使用原本的絕對路徑，請將 calib_path 替換為 r'C:\Users\USER\OneDrive\Desktop\programing_designer\SafeStep\backend\camera_cal\calibration*.jpg'
+        calib_path = os.path.join(cls.BASE_DIR, 'camera_cal', 'calibration*.jpg')
+        images_path = glob.glob(calib_path)
+
+        # 準備物體點 (object points)
+        objp = np.zeros((6*9, 3), np.float32)
+        objp[:, :2] = np.mgrid[0:9, 0:6].T.reshape(-1, 2)
+
+        objpoints = [] # 真實世界空間中的 3D 點
+        imgpoints = [] # 影像平面上的 2D 點
+        img_size = None
+
+        if not images_path:
+            print(f"[警告] 找不到校正影像於 {calib_path}，將略過畸變校正。請確認資料夾位置。")
+            return
+
+        for img_path in images_path:
+            img = cv2.imread(img_path)
+            if img is None: continue
+            gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
+            img_size = (gray.shape[1], gray.shape[0])
+            ret, corners = cv2.findChessboardCorners(gray, (9, 6), None)
+            if ret == True:
+                objpoints.append(objp)
+                imgpoints.append(corners)
+
+        if objpoints and img_size:
+            ret, mtx, dist, rvecs, tvecs = cv2.calibrateCamera(objpoints, imgpoints, img_size, None, None)
+            cls._mtx = mtx
+            cls._dist = dist
+            print("相機校正完成！")
+
     @staticmethod
     # 物件偵測
     def detect_objects(image):
@@ -160,39 +232,316 @@ class VisionProcessor:
 
     @staticmethod
     # 車道辨識
+    # 程式參考於 https://github.com/bob800530/CarND-Advanced-Lane-Lines.git
+    # 修改 src 透視變換使其動態化以進行市區車道辨識
     def detect_lanes(image):
-        """車道線辨識 (維持原邏輯)"""
-        gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
-        blur = cv2.GaussianBlur(gray, (5, 5), 0)
-        edges = cv2.Canny(blur, 50, 150)
+        # 確保相機已經校正 (只會真正執行一次)
+        VisionProcessor.initialize_camera_calibration()
 
-        height, width = edges.shape
-        mask = np.zeros_like(edges)
-        polygon = np.array([[
-            (int(width * 0.25), height),
-            (int(width * 0.85), height),
-            (int(width * 0.60), int(height * 0.4)),
-            (int(width * 0.40), int(height * 0.4))
-        ]], np.int32)
+        # ---- 影像閾值處理 (來自 saturation.py)
+        def abs_sobel_thresh(img, orient='x', sobel_kernel=3, thresh=(0, 255)):
+            """計算 x 或 y 方向的 Sobel 絕對值，並套用閾值"""
+            gray = cv2.cvtColor(img, cv2.COLOR_RGB2GRAY)
+            if orient == 'x':
+                abs_sobel = np.absolute(cv2.Sobel(gray, cv2.CV_64F, 1, 0, sobel_kernel))
+            if orient == 'y':
+                abs_sobel = np.absolute(cv2.Sobel(gray, cv2.CV_64F, 0, 1, sobel_kernel))
 
-        cv2.fillPoly(mask, polygon, 255)
-        masked_edges = cv2.bitwise_and(edges, mask)
+            scaled_sobel = np.uint8(255 * abs_sobel / np.max(abs_sobel))
+            binary_output = np.zeros_like(scaled_sobel)
+            binary_output[(scaled_sobel >= thresh[0]) & (scaled_sobel <= thresh[1])] = 1
+            return binary_output
 
-        lines = cv2.HoughLinesP(masked_edges, rho=1, theta=np.pi/180, threshold=50, minLineLength=40, maxLineGap=100)
-        line_image = np.zeros_like(image)
+        def mag_thresh(img, sobel_kernel=3, thresh=(0, 255)):
+            """計算梯度的強度 (Magnitude) 並套用閾值"""
+            gray = cv2.cvtColor(img, cv2.COLOR_RGB2GRAY)
+            sobelx = cv2.Sobel(gray, cv2.CV_64F, 1, 0, ksize=sobel_kernel)
+            sobely = cv2.Sobel(gray, cv2.CV_64F, 0, 1, ksize=sobel_kernel)
+            gradmag = np.sqrt(sobelx**2 + sobely**2)
 
-        if lines is not None:
-            for line in lines:
-                x1, y1, x2, y2 = line[0]
-                if x2 == x1: continue
-                slope = (y2 - y1) / (x2 - x1)
-                if 0.5 < abs(slope) < 2.0:
-                    cv2.line(line_image, (x1, y1), (x2, y2), (0, 0, 255), 4)
+            scale_factor = np.max(gradmag) / 255
+            gradmag = (gradmag / scale_factor).astype(np.uint8)
+            binary_output = np.zeros_like(gradmag)
+            binary_output[(gradmag >= thresh[0]) & (gradmag <= thresh[1])] = 1
+            return binary_output
 
-        return cv2.addWeighted(image, 0.8, line_image, 1, 0)
+        def dir_threshold(img, sobel_kernel=3, thresh=(0, np.pi/2)):
+            """計算梯度的方向 (Direction) 並套用閾值"""
+            gray = cv2.cvtColor(img, cv2.COLOR_RGB2GRAY)
+            sobelx = cv2.Sobel(gray, cv2.CV_64F, 1, 0, ksize=sobel_kernel)
+            sobely = cv2.Sobel(gray, cv2.CV_64F, 0, 1, ksize=sobel_kernel)
+
+            absgraddir = np.arctan2(np.absolute(sobely), np.absolute(sobelx))
+            binary_output = np.zeros_like(absgraddir)
+            binary_output[(absgraddir >= thresh[0]) & (absgraddir <= thresh[1])] = 1
+            return binary_output
+
+        def hls_select(img, thresh=(0, 255)):
+            """轉換為 HLS 色彩空間，並對 S 通道及 L 通道套用閾值過濾"""
+            hls = cv2.cvtColor(img, cv2.COLOR_RGB2HLS)
+            L = hls[:,:,1]
+            S = hls[:,:,2]
+            binary_output = np.zeros_like(S)
+            binary_output[(S > thresh[0]) & (S <= thresh[1]) & (L > 50)] = 1
+            return binary_output
+
+        def combine_threshs(grad_x, grad_y, mag_binary, dir_binary, col_binary):
+            """將方向、強度、色彩等多種閾值結果合併為單一的二值化影像"""
+            combined = np.zeros_like(dir_binary)
+            combined[((grad_x == 1) & (grad_y == 1)) | ((mag_binary == 1) & (dir_binary == 1)) | (col_binary == 1)] = 1
+            return combined
+
+
+        # ---- 透視變換 (來自 perspective.py)
+
+        # 定義透視變換的來源點 (src) 與目標點 (dst)
+        def get_transform_matrices(img):
+            """根據輸入影像的尺寸，動態計算並回傳透視變換矩陣 M 與反向矩陣 Minv"""
+            height = img.shape[0]
+            width = img.shape[1]
+
+            # === 設定動態比例參數 ===
+            # 這些比例是根據原本 1280x720 的最佳點位換算出來的
+            bottom_y = height * 0.97      # 底部位於影像高度的 97% 處
+            top_y = height * 0.64         # 頂部位於影像高度的 64% 處 (地平線下方)
+
+            bottom_left_x = width * 0.22  # 左下角位於寬度的 22%
+            bottom_right_x = width * 0.88 # 右下角位於寬度的 88%
+            top_left_x = width * 0.46     # 左上角位於寬度的 46%
+            top_right_x = width * 0.57    # 右上角位於寬度的 57%
+
+            # 1. 動態建立 src (來源點)
+            src = np.float32([
+                [bottom_left_x, bottom_y],  # 左下
+                [top_left_x, top_y],        # 左上
+                [top_right_x, top_y],       # 右上
+                [bottom_right_x, bottom_y]  # 右下
+            ])
+
+            # 2. 動態建立 dst (目標點，也就是鳥瞰圖展開後的矩形)
+            offset_x = width * 0.2  # 左右兩側留白 20%
+            dst = np.float32([
+                [offset_x, height],          # 左下
+                [offset_x, 0],               # 左上
+                [width - offset_x, 0],       # 右上
+                [width - offset_x, height]   # 右下
+            ])
+
+            # 3. 計算並回傳矩陣
+            M = cv2.getPerspectiveTransform(src, dst)
+            Minv = cv2.getPerspectiveTransform(dst, src)
+
+            return M, Minv
+
+        def perspective(img):
+            """將影像轉換為鳥瞰圖"""
+            M, _ = get_transform_matrices(img)
+            return cv2.warpPerspective(img, M, (img.shape[1], img.shape[0]))
+
+        def unperspective(img, original_img_shape):
+            """將鳥瞰圖轉回原本的攝影機視角
+            注意：因為轉回來的圖片需要配合原始尺寸，所以傳入原始影像的 shape
+            """
+            _, Minv = get_transform_matrices(np.zeros(original_img_shape)) # 建立一個假影像來取尺寸
+            return cv2.warpPerspective(img, Minv, (original_img_shape[1], original_img_shape[0]))
+
+        def draw_perspective_polygon(img):
+            """(測試用) 在原圖上畫出用於透視變換的基準區域多邊形"""
+            # 這邊為了相容性宣告一個假的 src
+            height, width = img.shape[:2]
+            src = np.float32([[width*0.22, height*0.97], [width*0.46, height*0.64], [width*0.57, height*0.64], [width*0.88, height*0.97]])
+            pts = np.array([src[0], src[1], src[2], src[3]], np.int32)
+            img_copy = np.copy(img)
+            cv2.polylines(img_copy, [pts], True, (0, 255, 255), 3)
+            return img_copy
+
+
+        # ---- 尋找車道線與多項式擬合 (整合自 test.py)
+        def find_lane_pixels(binary_warped):
+            """使用滑動視窗法在二值化的鳥瞰圖中尋找車道線像素"""
+            # 對影像下半部取直方圖
+            histogram = np.sum(binary_warped[binary_warped.shape[0]//2:, :], axis=0)
+            out_img = np.dstack((binary_warped, binary_warped, binary_warped)) * 255
+
+            midpoint = int(histogram.shape[0]//2)
+            leftx_base = np.argmax(histogram[:midpoint])
+            rightx_base = np.argmax(histogram[midpoint:]) + midpoint
+
+            nwindows = 9
+            margin = 100
+            minpix = 50
+            window_height = int(binary_warped.shape[0]//nwindows)
+
+            nonzero = binary_warped.nonzero()
+            nonzeroy = np.array(nonzero[0])
+            nonzerox = np.array(nonzero[1])
+
+            leftx_current = leftx_base
+            rightx_current = rightx_base
+            left_lane_inds = []
+            right_lane_inds = []
+
+            for window in range(nwindows):
+                win_y_low = binary_warped.shape[0] - (window+1)*window_height
+                win_y_high = binary_warped.shape[0] - window*window_height
+                win_xleft_low = leftx_current - margin
+                win_xleft_high = leftx_current + margin
+                win_xright_low = rightx_current - margin
+                win_xright_high = rightx_current + margin
+
+                # 畫出滑動視窗 (視覺化用途)
+                cv2.rectangle(out_img, (win_xleft_low, win_y_low), (win_xleft_high, win_y_high), (0, 255, 0), 2)
+                cv2.rectangle(out_img, (win_xright_low, win_y_low), (win_xright_high, win_y_high), (0, 255, 0), 2)
+
+                # 找出視窗內的非零像素索引
+                good_left_inds = ((nonzeroy >= win_y_low) & (nonzeroy < win_y_high) &
+                                  (nonzerox >= win_xleft_low) &  (nonzerox < win_xleft_high)).nonzero()[0]
+                good_right_inds = ((nonzeroy >= win_y_low) & (nonzeroy < win_y_high) &
+                                   (nonzerox >= win_xright_low) &  (nonzerox < win_xright_high)).nonzero()[0]
+
+                left_lane_inds.append(good_left_inds)
+                right_lane_inds.append(good_right_inds)
+
+                if len(good_left_inds) > minpix:
+                    leftx_current = int(np.mean(nonzerox[good_left_inds]))
+                if len(good_right_inds) > minpix:
+                    rightx_current = int(np.mean(nonzerox[good_right_inds]))
+
+            try:
+                left_lane_inds = np.concatenate(left_lane_inds)
+                right_lane_inds = np.concatenate(right_lane_inds)
+            except ValueError:
+                pass
+
+            leftx = nonzerox[left_lane_inds]
+            lefty = nonzeroy[left_lane_inds]
+            rightx = nonzerox[right_lane_inds]
+            righty = nonzeroy[right_lane_inds]
+
+            return leftx, lefty, rightx, righty, out_img
+
+        def fit_polynomial(binary_warped):
+            """為找到的車道線像素擬合二次多項式，並回傳標記影像與相關數據"""
+            leftx, lefty, rightx, righty, out_img = find_lane_pixels(binary_warped)
+            ploty = np.linspace(0, binary_warped.shape[0]-1, binary_warped.shape[0])
+
+            try:
+                left_fit = np.polyfit(lefty, leftx, 2)
+                right_fit = np.polyfit(righty, rightx, 2)
+                left_fitx = left_fit[0]*ploty**2 + left_fit[1]*ploty + left_fit[2]
+                right_fitx = right_fit[0]*ploty**2 + right_fit[1]*ploty + right_fit[2]
+            except TypeError:
+                print('擬合線段失敗！')
+                left_fit = [1, 1, 0]
+                right_fit = [1, 1, 0]
+                left_fitx = 1*ploty**2 + 1*ploty
+                right_fitx = 1*ploty**2 + 1*ploty
+
+            # 將找到的車道線像素分別上色為紅、藍
+            out_img[lefty, leftx] = [255, 0, 0]
+            out_img[righty, rightx] = [0, 0, 255]
+
+            line_img = np.zeros_like(out_img)
+            window_img = np.zeros_like(out_img)
+            line_img[lefty, leftx] = [255, 0, 0]
+            line_img[righty, rightx] = [0, 0, 255]
+
+            # 設定車道覆蓋區域的多邊形
+            left_line_window = np.array([np.transpose(np.vstack([left_fitx, ploty]))])
+            right_line_window = np.array([np.flipud(np.transpose(np.vstack([right_fitx, ploty])))])
+            left_line_pts = np.hstack((left_line_window, right_line_window))
+            cv2.fillPoly(window_img, np.int_([left_line_pts]), (0, 255, 0))
+
+            # (來自 test.py 的快速 Numpy 陣列賦值繪製法，可繪出黃色的擬合曲線)
+            # 注意：使用 np.clip 避免超出陣列邊界報錯
+            valid_left = np.clip(left_fitx, 0, binary_warped.shape[1]-1).astype(np.int64)
+            valid_right = np.clip(right_fitx, 0, binary_warped.shape[1]-1).astype(np.int64)
+            out_img[ploty.astype(np.int64), valid_left] = [255, 255, 0]
+            out_img[ploty.astype(np.int64), valid_right] = [255, 255, 0]
+
+            # 合併多邊形區域與車道像素
+            region_img = cv2.addWeighted(line_img, 1, window_img, 0.3, 0)
+
+            return region_img, left_fit, right_fit, left_fitx, right_fitx, ploty
+
+
+        # ---- 計算曲率與中心偏移
+        def add_curvature_and_data(img, left_fitx, right_fitx, ploty):
+            """計算並將曲率半徑、車輛偏離中心的距離寫入影像中"""
+            ym_per_pix = 25/720 # y 維度的每像素公尺數
+            xm_per_pix = 3.7/800 # x 維度的每像素公尺數
+
+            y_eval = np.max(ploty)
+
+            # 將像素空間轉換為真實世界(公尺)空間重新擬合
+            left_fit_cr = np.polyfit(ploty * ym_per_pix, left_fitx * xm_per_pix, 2)
+            right_fit_cr = np.polyfit(ploty * ym_per_pix, right_fitx * xm_per_pix, 2)
+
+            # 計算曲率半徑
+            left_curverad = ((1 + (2*left_fit_cr[0]*y_eval*ym_per_pix + left_fit_cr[1])**2)**1.5) / np.absolute(2*left_fit_cr[0])
+
+            # 計算車輛偏移量 (假設攝影機裝在車子正中央)
+            road_mid = img.shape[1] / 2
+            car_mid = (right_fitx[-1] + left_fitx[-1]) / 2 # 影像最底部的車道中心點
+            mid_dev = car_mid - road_mid
+            mid_dev_meter = abs(mid_dev) * xm_per_pix
+
+            # 準備顯示文字
+            curvature_word = f'Radius of Curvature = {left_curverad:.2f} (m)'
+            direction = 'right' if mid_dev > 0 else 'left'
+            mid_dev_word = f'Vehicle is {mid_dev_meter:.2f} m {direction} of center'
+
+            # 在圖片上繪製文字
+            cv2.putText(img, curvature_word, (100, 80), cv2.FONT_HERSHEY_SIMPLEX, 1.5, (255, 255, 255), 2)
+            cv2.putText(img, mid_dev_word, (100, 160), cv2.FONT_HERSHEY_SIMPLEX, 1.5, (255, 255, 255), 2)
+
+            return img
+
+
+        # ---- 主程式管線與執行
+        def process_image(img):
+            """處理單一幀影像的完整流程"""
+            # 1. 校正影像畸變 (使用類別變數快取的 mtx, dist)
+            if VisionProcessor._mtx is not None and VisionProcessor._dist is not None:
+                undist = cv2.undistort(img, VisionProcessor._mtx, VisionProcessor._dist, None, VisionProcessor._mtx)
+            else:
+                undist = img.copy() # 如果沒找到校正圖檔，就直接使用原圖
+
+            # 2. 獲取各項閾值並合併
+            grad_x = abs_sobel_thresh(undist, orient='x', sobel_kernel=15, thresh=(30, 100))
+            grad_y = abs_sobel_thresh(undist, orient='y', sobel_kernel=15, thresh=(30, 100))
+            mag_binary = mag_thresh(undist, sobel_kernel=15, thresh=(50, 100))
+            dir_binary = dir_threshold(undist, sobel_kernel=15, thresh=(0.7, 1.3))
+            hls_binary = hls_select(undist, thresh=(170, 255))
+            combined_binary = combine_threshs(grad_x, grad_y, mag_binary, dir_binary, hls_binary)
+
+            # 3. 轉換視角至鳥瞰圖
+            warped = perspective(combined_binary)
+
+            # 4. 偵測車道線並產生涵蓋區域圖
+            region_img, left_fit, right_fit, left_fitx, right_fitx, ploty = fit_polynomial(warped)
+
+            # 5. 反向透視變換，將車道區域轉回原始視角
+            region_real_img = unperspective(region_img, undist.shape).astype(np.uint8)
+
+            # 6. 與原始無畸變影像疊加
+            result_img = cv2.addWeighted(undist, 1, region_real_img, 0.5, 0)
+
+            # 7. 加入數據分析文字
+            final_img = add_curvature_and_data(result_img, left_fitx, right_fitx, ploty)
+
+            return final_img
+
+        # [修復] 將實際處理過後的圖像回傳
+        return process_image(image)
 
 # 測試 -----------------------------------------------------------------------------------------------
 if __name__ == "__main__":
+    # =========================================================================
+    # 以下為你原本註解掉的物件偵測/攝影機測試邏輯 (保留原樣)
+    # 若需使用，請將註解取消即可。
+    # =========================================================================
+
     # 因為計算速度需要連續幀，這裡改用您原本註解掉的連續影像/攝影機測試邏輯
     # 1. 設定影像來源 (可輸入測試影片路徑，或輸入 0 使用本機攝影機)
     video_source = "C:/Users/USER/OneDrive/Desktop/test_video.mp4" # 請改為您的測試影片或 0
@@ -221,6 +570,7 @@ if __name__ == "__main__":
 
         frame_count += 1
         image_height = frame.shape[0]
+        image_width = frame.shape[1]
 
         # 3. 呼叫 VisionProcessor 進行 YOLO 辨識與追蹤
         annotated_image, detected_items = VisionProcessor.detect_objects(frame)
@@ -228,6 +578,7 @@ if __name__ == "__main__":
         # 4. 呼叫 RiskEvaluator 計算危險指數，啟用「行人模式」
         analyzed_items, alert_queue = RiskEvaluator.evaluate_frame_risk(
             detected_items,
+            image_width,
             image_height,
             history_dict,
             mode="pedestrian"
@@ -275,6 +626,7 @@ if __name__ == "__main__":
     cv2.destroyAllWindows()
 
 
+
     # # 1. 設定影像來源 (可輸入測試影片的路徑 "test_video.mp4"，或輸入 0 使用本機攝影機)
     # video_source = "C:/Users/USER/OneDrive/Desktop/asf.png"
     # cap = cv2.VideoCapture(video_source)
@@ -304,12 +656,13 @@ if __name__ == "__main__":
 
     #     frame_count += 1
     #     image_height = frame.shape[0]
+    #     image_width = frame.shape[1]
 
     #     # 3. 呼叫 VisionProcessor 進行 YOLO 辨識與追蹤
     #     annotated_image, detected_items = VisionProcessor.detect_objects(frame)
 
     #     # 4. 呼叫 RiskEvaluator 計算危險指數，並取得排序後的列表
-    #     analyzed_items = RiskEvaluator.evaluate_frame_risk(detected_items, image_height, history_dict)
+    #     analyzed_items = RiskEvaluator.evaluate_frame_risk(detected_items, image_width, image_height, history_dict)
 
     #     # 5. 在終端機輸出要求資訊
     #     if analyzed_items:
