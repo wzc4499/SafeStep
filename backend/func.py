@@ -309,16 +309,11 @@ class VisionProcessor:
         img_size = (img_shape[1], img_shape[0])
         h, w = img_shape[:2]
 
-        # ==========================================
-        # 2. 動態透視轉換矩陣
-        # ==========================================
         def get_perspective_matrices(img_shape):
             h, w = img_shape[:2]
             is_landscape = w > h
             center_x = w * 0.5
-
             IS_DASHCAM_VIDEO = False
-
             if is_landscape:
                 if IS_DASHCAM_VIDEO:
                     top_y, bottom_y = h * 0.62, h * 0.95
@@ -329,203 +324,121 @@ class VisionProcessor:
             else:
                 top_y, bottom_y = h * 0.30, h * 1.0
                 top_width, bottom_width = w * 0.35, w * 0.95
-
             src = np.float32([
                 [center_x - bottom_width / 2, bottom_y],
                 [center_x - top_width / 2, top_y],
                 [center_x + top_width / 2, top_y],
                 [center_x + bottom_width / 2, bottom_y]
             ])
-
             offset_x = w * 0.25 if is_landscape else w * 0.15
-
             dst = np.float32([
                 [offset_x, h],
                 [offset_x, 0],
                 [w - offset_x, 0],
                 [w - offset_x, h]
             ])
-
             M = cv2.getPerspectiveTransform(src, dst)
             Minv = cv2.getPerspectiveTransform(dst, src)
-
             return M, Minv
 
-        # ==========================================
-        # 3. 綠色人行道偵測
-        # ==========================================
         def detect_green_walkway(img):
             h, w = img.shape[:2]
             hsv = cv2.cvtColor(img, cv2.COLOR_RGB2HSV)
-
-            # 稍微收緊綠色門檻，使其更聚焦在人工鋪面的綠色油漆上
             lower_green = np.array([35, 50, 50])
             upper_green = np.array([85, 255, 255])
-
             mask = cv2.inRange(hsv, lower_green, upper_green)
-
-            # 💡 修正點 1：直接將螢幕上半部（0 到 h*0.5）的遮罩全部抹黑（Ignore Sky & Trees）
             mask[0:int(h * 0.5), :] = 0
-
-            # 基本型態學去毛邊
             kernel = np.ones((5, 5), np.uint8)
             mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, kernel)
             mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, kernel)
-
-            # 💡 修正點 2：連通域面積篩選，防止路邊的小灌木叢或盆栽碎屑被誤認
-            contours, _ = cv2.findContours(
-                mask,
-                cv2.RETR_EXTERNAL,
-                cv2.CHAIN_APPROX_SIMPLE
-            )
-
+            contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
             clean_mask = np.zeros_like(mask)
             for cnt in contours:
                 area = cv2.contourArea(cnt)
-                # 只有大面積的連續綠色區塊（如真正的綠色柏油路）才會被保留下來
                 if area > 2000:
                     cv2.drawContours(clean_mask, [cnt], -1, 255, -1)
-
             return clean_mask
 
-        # ==========================================
-        # 4. 斑馬線：型態學融合 + 計數法
-        # ==========================================
         def detect_zebra_crossing(undist_img, M, img_size):
             hsv = cv2.cvtColor(undist_img, cv2.COLOR_RGB2HSV)
-
-            # 白色區域門檻（保持高亮度門檻 215）
             lower_white = np.array([0, 0, 215])
             upper_white = np.array([180, 50, 255])
             white_mask = cv2.inRange(hsv, lower_white, upper_white)
-
-            # 透視轉換
             warped = cv2.warpPerspective(white_mask, M, img_size)
-
-            # 型態學處理
             kernel_open = np.ones((3, 3), np.uint8)
             kernel_close = np.ones((15, 15), np.uint8)
             morph = cv2.morphologyEx(warped, cv2.MORPH_OPEN, kernel_open)
             morph = cv2.morphologyEx(morph, cv2.MORPH_CLOSE, kernel_close)
-
-            # 縱向群組膨脹（僅用於將鄰近線條群組化以利計數）
             merge_kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (15, 35))
             merged = cv2.dilate(morph, merge_kernel, iterations=1)
-
-            contours, _ = cv2.findContours(
-                merged,
-                cv2.RETR_EXTERNAL,
-                cv2.CHAIN_APPROX_SIMPLE
-            )
-
+            contours, _ = cv2.findContours(merged, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
             final_mask = np.zeros_like(merged)
-            valid_stripe_pts = []  # 💡 關鍵：只存通過嚴格幾何篩選的「精準白條頂點」
-
+            valid_stripe_pts = []
             for cnt in contours:
                 x, y, w, h = cv2.boundingRect(cnt)
                 area = cv2.contourArea(cnt)
                 if area < 1000:
                     continue
-
                 roi = morph[y:y+h, x:x+w]
-                stripe_contours, _ = cv2.findContours(
-                    roi,
-                    cv2.RETR_EXTERNAL,
-                    cv2.CHAIN_APPROX_SIMPLE
-                )
-
+                stripe_contours, _ = cv2.findContours(roi, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
                 temp_stripes = []
                 stripe_count = 0
-
                 for s in stripe_contours:
                     sx, sy, sw, sh = cv2.boundingRect(s)
                     s_area = cv2.contourArea(s)
-
-                    # 💡 核心優化：超嚴格幾何過濾
-                    # 1. sw > sh * 2.5 ： 寬度必須是高度的 2.5 倍以上（排除縱向車道線、坡道結構與雜亂反光）
-                    # 2. s_area > 250   ： 單條面積不能太小（排除地磚縫隙、水花雜訊）
-                    # 3. sw > 60        ： 寬度必須夠長（確保是真正的斑馬線白條）
                     if s_area > 250 and sw > sh * 2.5 and sw > 60:
                         stripe_count += 1
                         temp_stripes.append(s)
-
-                # 💡 只有內部包含 3 條以上「正牌白條」的區域，才獲准還原座標並繪製凸包
                 if stripe_count >= 3:
                     for s in temp_stripes:
                         s_global = s.copy()
                         s_global[:, :, 0] += x
                         s_global[:, :, 1] += y
                         valid_stripe_pts.append(s_global)
-
-            # 💡 蓋帳篷：只用「正牌白條」的點來連成單一凸包區塊
             if len(valid_stripe_pts) > 0:
                 all_pts = np.concatenate(valid_stripe_pts, axis=0)
                 hull = cv2.convexHull(all_pts)
                 cv2.drawContours(final_mask, [hull], -1, 255, -1)
-
             return final_mask
 
-        # ==========================================
-        # 5. 主程式處理流程 (移除冗餘的 LaneFinder 類別，直接執行)
-        # ==========================================
-        # 取得透視轉換矩陣
         M, Minv = get_perspective_matrices(img_shape)
 
-        # 若已成功取得相機校正參數，則進行畸變校正，否則使用原圖
         if VisionProcessor._mtx is not None and VisionProcessor._dist is not None:
             undist_img = cv2.undistort(image, VisionProcessor._mtx, VisionProcessor._dist, None, VisionProcessor._mtx)
         else:
             undist_img = image.copy()
 
-        # 偵測遮罩
         green_mask = detect_green_walkway(undist_img)
         zebra_warped_mask = detect_zebra_crossing(undist_img, M, img_size)
 
-        # 將斑馬線凸包區塊還原回透視視角
-        zebra_real_mask = cv2.warpPerspective(
-            zebra_warped_mask,
-            Minv,
-            img_size
-        )
+        zebra_real_mask = cv2.warpPerspective(zebra_warped_mask, Minv, img_size)
 
-        # ==========================================
-        # 💡 低視能專用：高亮度色彩與高對比疊加
-        # ==========================================
-        # 1. 建立色彩畫布
         overlay = np.zeros_like(undist_img)
+        overlay[zebra_real_mask > 0] = [255, 0, 0]
+        overlay[green_mask > 0] = [0, 255, 0]
 
-        # 2. 填入最高亮度的色塊
-        overlay[zebra_real_mask > 0] = [255, 0, 0]      # 鮮豔純紅
-        overlay[green_mask > 0] = [0, 255, 0]          # 💡 優化：改為高亮度螢光綠（原本是 150）
-
-        # 3. 提高不透明度（從 0.4 提升至 0.65），使色塊更顯眼
         alpha = 1.0
         beta = 0.65
         weighted_img = cv2.addWeighted(undist_img, alpha, overlay, beta, 0)
 
-        # 4. 💡 關鍵輔助：提取邊緣並繪製「高對比白色外框」
-        # 尋找還原視角後的斑馬線邊緣
-        zebra_contours, _ = cv2.findContours(
-            zebra_real_mask,
-            cv2.RETR_EXTERNAL,
-            cv2.CHAIN_APPROX_SIMPLE
-        )
-        # 尋找綠色人行道的邊緣
-        green_contours, _ = cv2.findContours(
-            green_mask,
-            cv2.RETR_EXTERNAL,
-            cv2.CHAIN_APPROX_SIMPLE
-        )
+        zebra_contours, _ = cv2.findContours(zebra_real_mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+        green_contours, _ = cv2.findContours(green_mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
 
-        # 在融合後的影像上，畫上粗度為 4 像素的純白 [255, 255, 255] 外框
-        # 這能形成極強的明暗對比，幫助低視能者瞬間識別邊界
         cv2.drawContours(weighted_img, zebra_contours, -1, [255, 255, 255], 4)
         cv2.drawContours(weighted_img, green_contours, -1, [255, 255, 255], 4)
 
-        # 正確回傳處理完畢的影像
-        return weighted_img
+        # 回傳圖片 + 座標供前端疊加
+        zebra_coords = [cnt.reshape(-1, 2).tolist() for cnt in zebra_contours]
+        green_coords = [cnt.reshape(-1, 2).tolist() for cnt in green_contours]
 
-    @staticmethod
+        return weighted_img, {
+            "zebra": zebra_coords,
+            "sidewalk": green_coords,
+            "img_w": img_size[0],
+            "img_h": img_size[1],
+        }
+
+        @staticmethod
     #　行人紅綠燈及一車輛用紅綠燈燈號辨識
     def traffic_lights(image, bbox):
         """

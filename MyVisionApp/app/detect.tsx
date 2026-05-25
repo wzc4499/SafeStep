@@ -6,6 +6,7 @@ import { CameraView, useCameraPermissions } from 'expo-camera';
 import { Audio } from 'expo-av';
 import * as Location from 'expo-location';
 import { useLocalSearchParams, useRouter, Stack } from 'expo-router';
+import Svg, { Polygon } from 'react-native-svg';
 
 const WS_URL = 'ws://192.168.8.200:8000/ws';
 const ALARM_THRESHOLD = 70;
@@ -23,6 +24,13 @@ type Box = {
   speed: number;
   light_status: number;
   specific_sign_name: string;
+};
+
+type LaneData = {
+  zebra: number[][][];
+  sidewalk: number[][][];
+  img_w: number;
+  img_h: number;
 };
 
 const DANGER_COLOR: Record<string, string> = {
@@ -51,8 +59,10 @@ export default function Detect() {
   const [permission, requestPermission] = useCameraPermissions();
   const [boxes, setBoxes] = useState<Box[]>([]);
   const [imgSize, setImgSize] = useState({ w: 1080, h: 1920 });
+  const [lanes, setLanes] = useState<LaneData>({ zebra: [], sidewalk: [], img_w: 1080, img_h: 1920 });
   const [isDetecting, setIsDetecting] = useState(false);
   const [status, setStatus] = useState('準備中...');
+  const [viewSize, setViewSize] = useState({ w: 0, h: 0 });
 
   const cameraRef = useRef<CameraView>(null);
   const wsRef = useRef<WebSocket | null>(null);
@@ -75,10 +85,7 @@ export default function Detect() {
   }, []);
 
   useEffect(() => {
-    Audio.setAudioModeAsync({
-      playsInSilentModeIOS: true,
-      staysActiveInBackground: true,
-    });
+    Audio.setAudioModeAsync({ playsInSilentModeIOS: true, staysActiveInBackground: true });
     connectWS();
     return () => {
       if (intervalRef.current) clearInterval(intervalRef.current);
@@ -88,13 +95,14 @@ export default function Detect() {
   }, []);
 
   const handleServerMessage = (data: any) => {
-    if (data.status === 'error') {
-      setStatus(`錯誤: ${data.message}`);
-      return;
-    }
+    if (data.status === 'error') { setStatus(`錯誤: ${data.message}`); return; }
+
     if (data.boxes) {
       setBoxes(data.boxes);
       setImgSize({ w: data.img_width, h: data.img_height });
+    }
+    if (data.lanes) {
+      setLanes(data.lanes);
     }
 
     if (data.mode === 'pedestrian') {
@@ -116,12 +124,8 @@ export default function Detect() {
         setStatus(`偵測中 - 發現 ${data.boxes?.length || 0} 個物件`);
       }
     } else if (data.mode === 'motorcycle') {
-      if (data.two_stage_warning) {
-        playAlarm();
-        setStatus('🚨 注意：前方路口需兩段式左轉');
-      } else {
-        setStatus(`導航中：${data.message}`);
-      }
+      if (data.two_stage_warning) { playAlarm(); setStatus('🚨 注意：前方路口需兩段式左轉'); }
+      else { setStatus(`導航中：${data.message}`); }
     }
   };
 
@@ -130,32 +134,21 @@ export default function Detect() {
     isAlarmPlaying.current = true;
     Vibration.vibrate([0, 500, 200, 500]);
     try {
-      await Audio.setAudioModeAsync({
-        playsInSilentModeIOS: true,
-        staysActiveInBackground: true,
-      });
+      await Audio.setAudioModeAsync({ playsInSilentModeIOS: true, staysActiveInBackground: true });
       const { sound } = await Audio.Sound.createAsync(
         require('../assets/beep.mp3'),
         { shouldPlay: true, volume: 1.0 }
       );
       sound.setOnPlaybackStatusUpdate((s) => {
-        if (s.isLoaded && s.didJustFinish) {
-          isAlarmPlaying.current = false;
-          sound.unloadAsync();
-        }
+        if (s.isLoaded && s.didJustFinish) { isAlarmPlaying.current = false; sound.unloadAsync(); }
       });
-    } catch {
-      isAlarmPlaying.current = false;
-    }
+    } catch { isAlarmPlaying.current = false; }
   }, []);
 
   const startDetection = async () => {
     if (!isPedestrian) {
       const { status: locStatus } = await Location.requestForegroundPermissionsAsync();
-      if (locStatus !== 'granted') {
-        setStatus('機車模式需要定位權限');
-        return;
-      }
+      if (locStatus !== 'granted') { setStatus('機車模式需要定位權限'); return; }
     }
     setIsDetecting(true);
     setStatus('辨識啟動中...');
@@ -166,25 +159,18 @@ export default function Detect() {
         if (!cameraRef.current || isCapturing.current) return;
         isCapturing.current = true;
         const photo = await cameraRef.current.takePictureAsync({
-          base64: true,
-          quality: 0.3,
-          skipProcessing: true,
+          base64: true, quality: 0.3, skipProcessing: true,
         });
-        const pureBase64 = photo?.base64
-          ? photo.base64.replace(/^data:image\/\w+;base64,/, '')
-          : '';
+        const pureBase64 = photo?.base64?.replace(/^data:image\/\w+;base64,/, '') || '';
 
         if (isPedestrian) {
           wsRef.current.send(JSON.stringify({ mode: 'pedestrian', image: pureBase64 }));
         } else {
           const loc = await Location.getCurrentPositionAsync({ accuracy: Location.Accuracy.Balanced });
           wsRef.current.send(JSON.stringify({
-            mode: 'motorcycle',
-            image: pureBase64,
-            lat: loc.coords.latitude,
-            lng: loc.coords.longitude,
-            heading: loc.coords.heading || 0,
-            action: 'turn_left',
+            mode: 'motorcycle', image: pureBase64,
+            lat: loc.coords.latitude, lng: loc.coords.longitude,
+            heading: loc.coords.heading || 0, action: 'turn_left',
           }));
         }
         isCapturing.current = false;
@@ -200,29 +186,20 @@ export default function Detect() {
     setStatus('已停止辨識');
     if (intervalRef.current) clearInterval(intervalRef.current);
     setBoxes([]);
+    setLanes({ zebra: [], sidewalk: [], img_w: 1080, img_h: 1920 });
   };
 
-  // 判斷是否為交通號誌
   const isTrafficSign = (box: Box) =>
-    box.specific_sign_name &&
-    box.specific_sign_name !== '未知號誌' &&
-    box.specific_sign_name !== '';
+    box.specific_sign_name && box.specific_sign_name !== '未知號誌' && box.specific_sign_name !== '';
+  const isLightBox = (box: Box) => box.light_status >= 0;
+  const getBoxLabel = (box: Box) => isLightBox(box) ? LIGHT_TEXT[box.light_status] : isTrafficSign(box) ? box.specific_sign_name : box.label;
+  const getListLabel = (box: Box) => isLightBox(box) ? LIGHT_TEXT[box.light_status] : isTrafficSign(box) ? box.specific_sign_name : box.label;
 
-  // 判斷是否為紅綠燈
-  const isLight = (box: Box) => box.light_status >= 0;
-
-  // 框框顯示標籤
-  const getBoxLabel = (box: Box): string => {
-    if (isLight(box)) return LIGHT_TEXT[box.light_status];
-    if (isTrafficSign(box)) return box.specific_sign_name;
-    return box.label;
-  };
-
-  // 清單顯示標籤
-  const getListLabel = (box: Box): string => {
-    if (isLight(box)) return `${LIGHT_TEXT[box.light_status]}`;
-    if (isTrafficSign(box)) return box.specific_sign_name;
-    return box.label;
+  // 把後端座標轉換成前端百分比位置的 SVG points 字串
+  const toSvgPoints = (contour: number[][], imgW: number, imgH: number, vw: number, vh: number) => {
+    return contour.map(([x, y]) =>
+      `${(x / imgW) * vw},${(y / imgH) * vh}`
+    ).join(' ');
   };
 
   if (!permission) return <View />;
@@ -241,7 +218,6 @@ export default function Detect() {
     <View style={styles.container}>
       <Stack.Screen options={{ headerShown: false }} />
 
-      {/* 頂部列 */}
       <View style={[styles.topBar, { backgroundColor: isPedestrian ? '#1a73e8' : '#e84c1a' }]}>
         <TouchableOpacity onPress={() => { stopDetection(); router.back(); }}>
           <Text style={styles.backBtn}>← 返回</Text>
@@ -253,16 +229,53 @@ export default function Detect() {
       </View>
 
       {/* 相機區域 */}
-      <View style={styles.cameraWrapper}>
+      <View
+        style={styles.cameraWrapper}
+        onLayout={(e) => {
+          const { width, height } = e.nativeEvent.layout;
+          setViewSize({ w: width, h: height });
+        }}
+      >
         <CameraView style={{ flex: 1 }} facing="back" ref={cameraRef}>
+
+          {/* 斑馬線和人行道 SVG 疊加層 */}
+          {viewSize.w > 0 && (
+            <Svg
+              style={StyleSheet.absoluteFill}
+              width={viewSize.w}
+              height={viewSize.h}
+            >
+              {/* 斑馬線：紅色半透明 */}
+              {lanes.zebra.map((contour, i) => (
+                <Polygon
+                  key={`zebra-${i}`}
+                  points={toSvgPoints(contour, lanes.img_w, lanes.img_h, viewSize.w, viewSize.h)}
+                  fill="rgba(255, 50, 50, 0.35)"
+                  stroke="white"
+                  strokeWidth="2"
+                />
+              ))}
+              {/* 人行道：綠色半透明 */}
+              {lanes.sidewalk.map((contour, i) => (
+                <Polygon
+                  key={`sidewalk-${i}`}
+                  points={toSvgPoints(contour, lanes.img_w, lanes.img_h, viewSize.w, viewSize.h)}
+                  fill="rgba(50, 255, 50, 0.25)"
+                  stroke="white"
+                  strokeWidth="2"
+                />
+              ))}
+            </Svg>
+          )}
+
+          {/* 物件框框 */}
           {boxes.map((box, i) => {
             const isSign = isTrafficSign(box);
-            const isLightBox = isLight(box);
-            const color = isLightBox
+            const isLight = isLightBox(box);
+            const color = isLight
               ? (LIGHT_COLOR[box.light_status] || '#00cc66')
-              : isSign
-                ? '#FFA500'
-                : (DANGER_COLOR[box.danger] || '#00cc66');
+              : isSign ? '#FFA500'
+              : (DANGER_COLOR[box.danger] || '#00cc66');
 
             return (
               <View
@@ -277,11 +290,8 @@ export default function Detect() {
                 }]}
               >
                 <View style={[styles.boxInfo, { backgroundColor: `${color}cc` }]}>
-                  <Text style={styles.boxLabel} numberOfLines={2}>
-                    {getBoxLabel(box)}
-                  </Text>
-                  {/* 交通號誌和紅綠燈不顯示距離和危險值 */}
-                  {!isSign && !isLightBox && (
+                  <Text style={styles.boxLabel} numberOfLines={2}>{getBoxLabel(box)}</Text>
+                  {!isSign && !isLight && (
                     <Text style={styles.boxDetail} numberOfLines={1}>
                       {box.distance}m｜危{box.danger_pct}%
                     </Text>
@@ -309,35 +319,26 @@ export default function Detect() {
       <ScrollView style={styles.listArea}>
         {boxes.map((box, i) => {
           const isSign = isTrafficSign(box);
-          const isLightBox = isLight(box);
-          const color = isLightBox
+          const isLight = isLightBox(box);
+          const color = isLight
             ? (LIGHT_COLOR[box.light_status] || '#00cc66')
-            : isSign
-              ? '#aaaaaa'
-              : (DANGER_COLOR[box.danger] || '#00cc66');
-
-          const speedText = (box.speed ?? 0) > 2
-            ? '🔴 快速逼近'
-            : (box.speed ?? 0) > 0.5
-              ? '🟡 緩慢靠近'
-              : '🟢 穩定';
+            : isSign ? '#FFA500'
+            : (DANGER_COLOR[box.danger] || '#00cc66');
+          const speedText = (box.speed ?? 0) > 2 ? '🔴 快速逼近'
+            : (box.speed ?? 0) > 0.5 ? '🟡 緩慢靠近' : '🟢 穩定';
 
           return (
             <View key={`${box.track_id}-${i}`} style={[styles.listItem, { borderLeftColor: color }]}>
               <View style={{ flex: 1 }}>
                 <Text style={styles.listLabel}>{getListLabel(box)}</Text>
-                {/* 交通號誌和紅綠燈只顯示名稱，不顯示距離速度 */}
-                {!isSign && !isLightBox && (
+                {!isSign && !isLight && (
                   <>
-                    <Text style={styles.listSub}>
-                      距離: {box.distance}m｜速度: {box.speed?.toFixed(1) || 0} px/f
-                    </Text>
+                    <Text style={styles.listSub}>距離: {box.distance}m｜速度: {box.speed?.toFixed(1) || 0} px/f</Text>
                     <Text style={styles.listSub}>{speedText}</Text>
                   </>
                 )}
               </View>
-              {/* 交通號誌和紅綠燈不顯示危險值 badge */}
-              {!isSign && !isLightBox && (
+              {!isSign && !isLight && (
                 <View style={[styles.dangerBadge, { backgroundColor: color }]}>
                   <Text style={styles.dangerText}>危險 {box.danger_pct}%</Text>
                 </View>
@@ -347,7 +348,6 @@ export default function Detect() {
         })}
       </ScrollView>
 
-      {/* 按鈕區 */}
       <View style={styles.controls}>
         <TouchableOpacity
           style={[styles.button, isDetecting && styles.buttonStop]}
@@ -385,16 +385,7 @@ const styles = StyleSheet.create({
   buttonStop: { backgroundColor: '#ff4444' },
   buttonText: { fontSize: 18, fontWeight: '700', color: '#111' },
   box: { position: 'absolute', borderWidth: 1, borderRadius: 3 },
-  boxInfo: {
-    position: 'absolute',
-    bottom: -46,
-    left: -1,
-    paddingHorizontal: 4,
-    paddingVertical: 2,
-    borderRadius: 3,
-    minWidth: 80,
-    maxWidth: 160,
-  },
+  boxInfo: { position: 'absolute', bottom: -46, left: -1, paddingHorizontal: 4, paddingVertical: 2, borderRadius: 3, minWidth: 80, maxWidth: 160 },
   boxLabel: { color: '#fff', fontSize: 10, fontWeight: '700' },
   boxDetail: { color: '#fff', fontSize: 9 },
 });

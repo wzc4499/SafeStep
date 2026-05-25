@@ -22,7 +22,6 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# server 啟動時主動初始化分類器，確保 sign_transforms 不是 None
 @app.on_event("startup")
 async def startup_event():
     VisionProcessor.initialize_classifier()
@@ -54,7 +53,6 @@ def fetch_mapillary_image(lat, lng, heading):
     try:
         response = requests.get(search_url, timeout=5)
         if response.status_code != 200: return None
-
         data = response.json().get('data', [])
         if not data: return None
 
@@ -85,7 +83,6 @@ def fetch_mapillary_image(lat, lng, heading):
     return None
 
 def get_sign_name(sign_id: int) -> str:
-    """將分類器 ID 轉換為中文號誌名稱"""
     try:
         if sign_id != -1 and sign_id < len(SIGN_CLASSES):
             folder_name = SIGN_CLASSES[sign_id]
@@ -109,7 +106,6 @@ async def websocket_endpoint(websocket: WebSocket):
                 await websocket.send_json({"status": "error", "message": "資料格式錯誤", "details": e.errors()})
                 continue
 
-            # 機車模式
             if payload.mode == "motorcycle":
                 if None in [payload.lat, payload.lng, payload.heading, payload.action]:
                     await websocket.send_json({"status": "error", "message": "機車模式參數缺失"})
@@ -131,7 +127,6 @@ async def websocket_endpoint(websocket: WebSocket):
                     if item["class_id"] == 7:
                         sign_id = -1
                         sign_name = ""
-                        # 分類器就緒才呼叫
                         if VisionProcessor.sign_classifier is not None and VisionProcessor.sign_transforms is not None:
                             try:
                                 sign_id = VisionProcessor.classify_traffic_sign(street_img, item["bbox"])
@@ -164,7 +159,6 @@ async def websocket_endpoint(websocket: WebSocket):
                     "signs_detected": traffic_signs, "two_stage_warning": two_stage_warning
                 })
 
-            # 行人模式
             elif payload.mode == "pedestrian":
                 if not payload.image:
                     await websocket.send_json({"status": "error", "message": "缺少影像參數"})
@@ -184,8 +178,10 @@ async def websocket_endpoint(websocket: WebSocket):
 
                 annotated_image, detected_items = VisionProcessor.detect_objects(img_cv2)
 
+                # 斑馬線偵測，同時取得座標
+                lane_data = {"zebra": [], "sidewalk": [], "img_w": img_w, "img_h": img_h}
                 try:
-                    annotated_image = VisionProcessor.detect_lanes(annotated_image)
+                    annotated_image, lane_data = VisionProcessor.detect_lanes(annotated_image)
                 except Exception as e:
                     print(f"斑馬線/人行道辨識發生錯誤: {e}")
 
@@ -197,7 +193,6 @@ async def websocket_endpoint(websocket: WebSocket):
                 for item in analyzed_items:
                     label_en = VisionProcessor.get_label_name(item["class_id"])
 
-                    # 紅綠燈辨識
                     light_status = -1
                     if label_en.lower() in ["traffic light", "pedestrian light"]:
                         try:
@@ -205,7 +200,6 @@ async def websocket_endpoint(websocket: WebSocket):
                         except Exception as e:
                             print(f"紅綠燈辨識失敗: {e}")
 
-                    # 交通號誌分類（分類器就緒才呼叫）
                     specific_sign_id = -1
                     specific_sign_name = ""
                     if (label_en.lower() == "traffic sign"
@@ -242,6 +236,7 @@ async def websocket_endpoint(websocket: WebSocket):
                     "boxes": boxes,
                     "img_width": img_w,
                     "img_height": img_h,
+                    "lanes": lane_data,
                     "processed_image": processed_image_b64,
                 })
 
