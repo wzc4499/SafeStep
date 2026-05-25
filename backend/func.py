@@ -438,7 +438,7 @@ class VisionProcessor:
             "img_h": img_size[1],
         }
 
-        @staticmethod
+    @staticmethod
     #　行人紅綠燈及一車輛用紅綠燈燈號辨識
     def traffic_lights(image, bbox):
         """

@@ -48,39 +48,39 @@ class SystemPayload(BaseModel):
     heading: Optional[float] = None
     action: Optional[str] = None
 
-def fetch_mapillary_image(lat, lng, heading):
-    search_url = f"https://graph.mapillary.com/images?access_token={MAPILLARY_ACCESS_TOKEN}&fields=id,compass_angle&bbox={lng-0.0005},{lat-0.0005},{lng+0.0005},{lat+0.0005}"
-    try:
-        response = requests.get(search_url, timeout=5)
-        if response.status_code != 200: return None
-        data = response.json().get('data', [])
-        if not data: return None
+# def fetch_mapillary_image(lat, lng, heading):
+#     search_url = f"https://graph.mapillary.com/images?access_token={MAPILLARY_ACCESS_TOKEN}&fields=id,compass_angle&bbox={lng-0.0005},{lat-0.0005},{lng+0.0005},{lat+0.0005}"
+#     try:
+#         response = requests.get(search_url, timeout=5)
+#         if response.status_code != 200: return None
+#         data = response.json().get('data', [])
+#         if not data: return None
 
-        best_image_id = None
-        min_angle_diff = 360
-        for img_data in data:
-            angle = img_data.get('compass_angle', 0)
-            diff = abs((angle - heading + 180) % 360 - 180)
-            if diff < min_angle_diff and diff < 45:
-                min_angle_diff = diff
-                best_image_id = img_data['id']
+#         best_image_id = None
+#         min_angle_diff = 360
+#         for img_data in data:
+#             angle = img_data.get('compass_angle', 0)
+#             diff = abs((angle - heading + 180) % 360 - 180)
+#             if diff < min_angle_diff and diff < 45:
+#                 min_angle_diff = diff
+#                 best_image_id = img_data['id']
 
-        if not best_image_id: return None
+#         if not best_image_id: return None
 
-        img_url_req = f"https://graph.mapillary.com/{best_image_id}?access_token={MAPILLARY_ACCESS_TOKEN}&fields=thumb_1024_url"
-        res = requests.get(img_url_req, timeout=5)
-        img_url = res.json().get('thumb_1024_url')
+#         img_url_req = f"https://graph.mapillary.com/{best_image_id}?access_token={MAPILLARY_ACCESS_TOKEN}&fields=thumb_1024_url"
+#         res = requests.get(img_url_req, timeout=5)
+#         img_url = res.json().get('thumb_1024_url')
 
-        if img_url:
-            img_resp = requests.get(img_url, timeout=5)
-            img_bytes = np.frombuffer(img_resp.content, np.uint8)
-            img_np = cv2.imdecode(img_bytes, cv2.IMREAD_COLOR)
-            return img_np
+#         if img_url:
+#             img_resp = requests.get(img_url, timeout=5)
+#             img_bytes = np.frombuffer(img_resp.content, np.uint8)
+#             img_np = cv2.imdecode(img_bytes, cv2.IMREAD_COLOR)
+#             return img_np
 
-    except Exception as e:
-        print(f"Mapillary 抓取失敗: {e}")
-        return None
-    return None
+#     except Exception as e:
+#         print(f"Mapillary 抓取失敗: {e}")
+#         return None
+#     return None
 
 def get_sign_name(sign_id: int) -> str:
     try:
@@ -107,57 +107,59 @@ async def websocket_endpoint(websocket: WebSocket):
                 continue
 
             if payload.mode == "motorcycle":
-                if None in [payload.lat, payload.lng, payload.heading, payload.action]:
-                    await websocket.send_json({"status": "error", "message": "機車模式參數缺失"})
-                    continue
+                #  ------ 廢案 ---------------------------------------------------
+                # if None in [payload.lat, payload.lng, payload.heading, payload.action]:
+                #     await websocket.send_json({"status": "error", "message": "機車模式參數缺失"})
+                #     continue
 
-                street_img = fetch_mapillary_image(payload.lat, payload.lng, payload.heading)
-                if street_img is None:
-                    await websocket.send_json({
-                        "status": "success", "mode": "motorcycle",
-                        "message": "無街景資料", "signs_detected": [], "two_stage_warning": False
-                    })
-                    continue
+                # street_img = fetch_mapillary_image(payload.lat, payload.lng, payload.heading)
+                # if street_img is None:
+                #     await websocket.send_json({
+                #         "status": "success", "mode": "motorcycle",
+                #         "message": "無街景資料", "signs_detected": [], "two_stage_warning": False
+                #     })
+                #     continue
 
-                _, detected_items = VisionProcessor.detect_objects(street_img)
-                traffic_signs = []
-                two_stage_warning = False
+                # _, detected_items = VisionProcessor.detect_objects(street_img)
+                # traffic_signs = []
+                # two_stage_warning = False
 
-                for item in detected_items:
-                    if item["class_id"] == 7:
-                        sign_id = -1
-                        sign_name = ""
-                        if VisionProcessor.sign_classifier is not None and VisionProcessor.sign_transforms is not None:
-                            try:
-                                sign_id = VisionProcessor.classify_traffic_sign(street_img, item["bbox"])
-                                sign_name = get_sign_name(sign_id)
-                            except Exception as e:
-                                print(f"號誌分類失敗: {e}")
+                # for item in detected_items:
+                #     if item["class_id"] == 7:
+                #         sign_id = -1
+                #         sign_name = ""
+                #         if VisionProcessor.sign_classifier is not None and VisionProcessor.sign_transforms is not None:
+                #             try:
+                #                 sign_id = VisionProcessor.classify_traffic_sign(street_img, item["bbox"])
+                #                 sign_name = get_sign_name(sign_id)
+                #             except Exception as e:
+                #                 print(f"號誌分類失敗: {e}")
 
-                        traffic_signs.append({
-                            "bbox": item["bbox"],
-                            "confidence": item["confidence"],
-                            "specific_sign_id": sign_id,
-                            "specific_sign_name": sign_name,
-                        })
+                #         traffic_signs.append({
+                #             "bbox": item["bbox"],
+                #             "confidence": item["confidence"],
+                #             "specific_sign_id": sign_id,
+                #             "specific_sign_name": sign_name,
+                #         })
 
-                        if "left" in payload.action.lower():
-                            x1, y1, x2, y2 = map(int, item["bbox"])
-                            y1, y2 = max(0, y1), min(street_img.shape[0], y2)
-                            x1, x2 = max(0, x1), min(street_img.shape[1], x2)
-                            sign_roi = street_img[y1:y2, x1:x2]
+                #         if "left" in payload.action.lower():
+                #             x1, y1, x2, y2 = map(int, item["bbox"])
+                #             y1, y2 = max(0, y1), min(street_img.shape[0], y2)
+                #             x1, x2 = max(0, x1), min(street_img.shape[1], x2)
+                #             sign_roi = street_img[y1:y2, x1:x2]
 
-                            if sign_roi.size > 0:
-                                hsv = cv2.cvtColor(sign_roi, cv2.COLOR_BGR2HSV)
-                                mask = cv2.inRange(hsv, np.array([100, 150, 50]), np.array([140, 255, 255]))
-                                if (cv2.countNonZero(mask) / (sign_roi.shape[0] * sign_roi.shape[1] + 1e-6)) > 0.3:
-                                    two_stage_warning = True
+                #             if sign_roi.size > 0:
+                #                 hsv = cv2.cvtColor(sign_roi, cv2.COLOR_BGR2HSV)
+                #                 mask = cv2.inRange(hsv, np.array([100, 150, 50]), np.array([140, 255, 255]))
+                #                 if (cv2.countNonZero(mask) / (sign_roi.shape[0] * sign_roi.shape[1] + 1e-6)) > 0.3:
+                #                     two_stage_warning = True
 
-                response_msg = "需兩段式左轉" if two_stage_warning else "可直接左轉"
-                await websocket.send_json({
-                    "status": "success", "mode": "motorcycle", "message": response_msg,
-                    "signs_detected": traffic_signs, "two_stage_warning": two_stage_warning
-                })
+                # response_msg = "需兩段式左轉" if two_stage_warning else "可直接左轉"
+                # await websocket.send_json({
+                #     "status": "success", "mode": "motorcycle", "message": response_msg,
+                #     "signs_detected": traffic_signs, "two_stage_warning": two_stage_warning
+                # })
+                pass
 
             elif payload.mode == "pedestrian":
                 if not payload.image:
