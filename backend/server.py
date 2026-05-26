@@ -16,6 +16,7 @@ from traffic_labels import SIGN_CLASSES, SIGN_ZH
 
 app = FastAPI()
 
+# 設定 CORS (跨來源資源共用)，允許任意前端來源連線此 API
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -25,10 +26,12 @@ app.add_middleware(
 
 @app.on_event("startup")
 async def startup_event():
+    # 確保在 Server 啟動時先載入 PyTorch 號誌分類模型，避免第一次請求等待過久
     VisionProcessor.initialize_classifier()
 
 MAPILLARY_ACCESS_TOKEN = " "
 
+# 中英文標籤對照表
 LABEL_ZH = {
     'obstacle': '障礙物',
     'human': '行人',
@@ -41,6 +44,7 @@ LABEL_ZH = {
     'traffic light': '紅綠燈',
 }
 
+# 定義前端傳來的資料結構，使用 Pydantic 來做資料驗證
 class SystemPayload(BaseModel):
     mode: str
     image: Optional[str] = None
@@ -50,40 +54,10 @@ class SystemPayload(BaseModel):
     action: Optional[str] = None
 
 # def fetch_mapillary_image(lat, lng, heading):
-#     search_url = f"https://graph.mapillary.com/images?access_token={MAPILLARY_ACCESS_TOKEN}&fields=id,compass_angle&bbox={lng-0.0005},{lat-0.0005},{lng+0.0005},{lat+0.0005}"
-#     try:
-#         response = requests.get(search_url, timeout=5)
-#         if response.status_code != 200: return None
-#         data = response.json().get('data', [])
-#         if not data: return None
-
-#         best_image_id = None
-#         min_angle_diff = 360
-#         for img_data in data:
-#             angle = img_data.get('compass_angle', 0)
-#             diff = abs((angle - heading + 180) % 360 - 180)
-#             if diff < min_angle_diff and diff < 45:
-#                 min_angle_diff = diff
-#                 best_image_id = img_data['id']
-
-#         if not best_image_id: return None
-
-#         img_url_req = f"https://graph.mapillary.com/{best_image_id}?access_token={MAPILLARY_ACCESS_TOKEN}&fields=thumb_1024_url"
-#         res = requests.get(img_url_req, timeout=5)
-#         img_url = res.json().get('thumb_1024_url')
-
-#         if img_url:
-#             img_resp = requests.get(img_url, timeout=5)
-#             img_bytes = np.frombuffer(img_resp.content, np.uint8)
-#             img_np = cv2.imdecode(img_bytes, cv2.IMREAD_COLOR)
-#             return img_np
-
-#     except Exception as e:
-#         print(f"Mapillary 抓取失敗: {e}")
-#         return None
-#     return None
+#     ... [廢案：曾用於從地圖 API 抓取街景圖的邏輯] ...
 
 def get_sign_name(sign_id: int) -> str:
+    """透過 ID 取得交通號誌的中文名稱"""
     try:
         if sign_id != -1 and sign_id < len(SIGN_CLASSES):
             folder_name = SIGN_CLASSES[sign_id]
@@ -94,14 +68,19 @@ def get_sign_name(sign_id: int) -> str:
 
 @app.websocket("/ws")
 async def websocket_endpoint(websocket: WebSocket):
+    # 接受 WebSocket 連線請求
     await websocket.accept()
+
+    # 存放目前 WebSocket session 中物件追蹤歷史紀錄，以便計算連續幀相對速度
     session_tracking_history = {}
 
     try:
         while True:
+            # 等待接收前端傳送的 JSON 格式訊息
             data = await websocket.receive_json()
 
             try:
+                # 透過 Pydantic 將資料轉為物件並驗證格式
                 payload = SystemPayload(**data)
             except ValidationError as e:
                 await websocket.send_json({"status": "error", "message": "資料格式錯誤", "details": e.errors()})
@@ -109,72 +88,20 @@ async def websocket_endpoint(websocket: WebSocket):
 
             if payload.mode == "motorcycle":
                 #  ------ 廢案 ---------------------------------------------------
-                # if None in [payload.lat, payload.lng, payload.heading, payload.action]:
-                #     await websocket.send_json({"status": "error", "message": "機車模式參數缺失"})
-                #     continue
-
-                # street_img = fetch_mapillary_image(payload.lat, payload.lng, payload.heading)
-                # if street_img is None:
-                #     await websocket.send_json({
-                #         "status": "success", "mode": "motorcycle",
-                #         "message": "無街景資料", "signs_detected": [], "two_stage_warning": False
-                #     })
-                #     continue
-
-                # _, detected_items = VisionProcessor.detect_objects(street_img)
-                # traffic_signs = []
-                # two_stage_warning = False
-
-                # for item in detected_items:
-                #     if item["class_id"] == 7:
-                #         sign_id = -1
-                #         sign_name = ""
-                #         if VisionProcessor.sign_classifier is not None and VisionProcessor.sign_transforms is not None:
-                #             try:
-                #                 sign_id = VisionProcessor.classify_traffic_sign(street_img, item["bbox"])
-                #                 sign_name = get_sign_name(sign_id)
-                #             except Exception as e:
-                #                 print(f"號誌分類失敗: {e}")
-
-                #         traffic_signs.append({
-                #             "bbox": item["bbox"],
-                #             "confidence": item["confidence"],
-                #             "specific_sign_id": sign_id,
-                #             "specific_sign_name": sign_name,
-                #         })
-
-                #         if "left" in payload.action.lower():
-                #             x1, y1, x2, y2 = map(int, item["bbox"])
-                #             y1, y2 = max(0, y1), min(street_img.shape[0], y2)
-                #             x1, x2 = max(0, x1), min(street_img.shape[1], x2)
-                #             sign_roi = street_img[y1:y2, x1:x2]
-
-                #             if sign_roi.size > 0:
-                #                 hsv = cv2.cvtColor(sign_roi, cv2.COLOR_BGR2HSV)
-                #                 mask = cv2.inRange(hsv, np.array([100, 150, 50]), np.array([140, 255, 255]))
-                #                 if (cv2.countNonZero(mask) / (sign_roi.shape[0] * sign_roi.shape[1] + 1e-6)) > 0.3:
-                #                     two_stage_warning = True
-
-                # response_msg = "需兩段式左轉" if two_stage_warning else "可直接左轉"
-                # await websocket.send_json({
-                #     "status": "success", "mode": "motorcycle", "message": response_msg,
-                #     "signs_detected": traffic_signs, "two_stage_warning": two_stage_warning
-                # })
+                # 機車模式的邏輯目前暫時被註解停用
                 pass
 
             elif payload.mode == "pedestrian":
+                # 驗證必要參數
                 if not payload.image:
                     await websocket.send_json({"status": "error", "message": "缺少影像參數"})
                     continue
 
                 try:
+                    # 將前端傳來的 Base64 字串轉碼回 OpenCV 可讀的影像矩陣 (NumPy Array)
                     img_bytes = base64.b64decode(payload.image)
 
-                    # img_pil = Image.open(io.BytesIO(img_bytes))
-                    # img_pil = ImageOps.exif_transpose(img_pil)
-                    # img_pil = img_pil.convert("RGB")
-                    # img_np = np.array(img_pil)
-                    # img_cv2 = cv2.cvtColor(img_np, cv2.COLOR_RGB2BGR)
+                    # 這裡直接從記憶體 Buffer 讀取影像位元組，減少 I/O 時間消耗
                     nparr = np.frombuffer(img_bytes, np.uint8)
                     img_cv2 = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
 
@@ -185,13 +112,15 @@ async def websocket_endpoint(websocket: WebSocket):
 
                 # [並行處理]
                 # 將 YOLO 模型推論與傳統 CV 斑馬線辨識丟入不同執行緒同時運算
+                # 這樣可以避免其中一個運算阻塞(Blocking)另一個運算，提升每秒幀數(FPS)
                 task_yolo = asyncio.to_thread(VisionProcessor.detect_objects, img_cv2.copy())
                 task_lane = asyncio.to_thread(VisionProcessor.detect_lanes, img_cv2.copy())
 
-                # 等待兩個影像處理任務同時完成
+                # 等待兩個影像處理任務同時完成，將結果解構
                 (yolo_annotated, detected_items), (lane_annotated, lane_data) = await asyncio.gather(task_yolo, task_lane)
 
                 # 風險評估 (依賴 YOLO 結果，已確認以距離與逼近速度為主)
+                # 使用保存的 session_tracking_history 來持續比對同一物件
                 analyzed_items, alert_queue = RiskEvaluator.evaluate_frame_risk(
                     detected_items, img_w, img_h, session_tracking_history, mode="pedestrian"
                 )
@@ -200,6 +129,7 @@ async def websocket_endpoint(websocket: WebSocket):
                 # 以畫好斑馬線與人行道的 lane_annotated 作為最終影像的底圖
                 final_image = lane_annotated.copy()
 
+                # 遍歷經過風險評估後的物件，準備將資料組合送回前端
                 for item in analyzed_items:
                     label_en = VisionProcessor.get_label_name(item["class_id"])
 
@@ -207,12 +137,14 @@ async def websocket_endpoint(websocket: WebSocket):
                     light_status = -1
                     if label_en.lower() in ["traffic light", "pedestrian light"]:
                         try:
+                            # 去判斷紅、綠、黃燈
                             light_status = VisionProcessor.traffic_lights(img_cv2, item["bbox"])
                         except Exception as e:
                             print(f"紅綠燈辨識失敗: {e}")
 
                     specific_sign_id = -1
                     specific_sign_name = ""
+                    # 若為交通標誌，調用 PyTorch 模型確認詳細種類
                     if (label_en.lower() == "traffic sign"
                             and VisionProcessor.sign_classifier is not None
                             and VisionProcessor.sign_transforms is not None):
@@ -222,6 +154,7 @@ async def websocket_endpoint(websocket: WebSocket):
                         except Exception as e:
                             print(f"號誌分類失敗: {e}")
 
+                    # 將前端所需的所有資訊存入陣列
                     boxes.append({
                         "track_id": item["track_id"],
                         "x1": item["bbox"][0], "y1": item["bbox"][1],
@@ -242,6 +175,7 @@ async def websocket_endpoint(websocket: WebSocket):
                     x1, y1, x2, y2 = map(int, item["bbox"])
                     danger = item.get("danger_level", "低")
 
+                    # 以不同顏色標示物件危險程度
                     if danger == "高":
                         color = (0, 0, 255)   # 紅色 (高危險)
                     elif danger == "中":
@@ -254,24 +188,27 @@ async def websocket_endpoint(websocket: WebSocket):
                     # display_label = LABEL_ZH.get(label_en, label_en)
                     # cv2.putText(final_image, display_label, (x1, max(15, y1 - 10)), cv2.FONT_HERSHEY_SIMPLEX, 0.6, color, 2)
 
-                # 將合成好的最終影像轉回 Base64
+                # 將合成好的最終影像轉回 JPG 格式的 Base64，以便前端網頁渲染
                 _, buffer = cv2.imencode('.jpg', final_image)
                 processed_image_b64 = base64.b64encode(buffer).decode('utf-8')
 
+                # 發送 WebSocket 訊息給客戶端
                 await websocket.send_json({
                     "status": "success",
                     "mode": "pedestrian",
-                    "boxes": boxes,
+                    "boxes": boxes, # 所有物件的座標、特徵與危險評估資料
                     "img_width": img_w,
                     "img_height": img_h,
-                    "lanes": lane_data,
-                    "processed_image": processed_image_b64,
+                    "lanes": lane_data, # 人行道與斑馬線的多邊形座標陣列
+                    "processed_image": processed_image_b64, # 標註完畢的圖像
                 })
 
     except WebSocketDisconnect:
+        # 當客戶端 (App 或網頁) 斷線時，清空當下的追蹤紀錄
         print("Client 已經斷開連線，清理追蹤紀錄...")
         session_tracking_history.clear()
 
 @app.get("/")
 async def root():
+    # 提供一個簡單的 HTTP 測試入口，確認伺服器有成功運行
     return {"status": "SafeStep Server is running! WebSocket endpoint is at /ws"}

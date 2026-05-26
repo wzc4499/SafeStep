@@ -8,7 +8,7 @@ import * as Location from 'expo-location';
 import { useLocalSearchParams, useRouter, Stack } from 'expo-router';
 import Svg, { Polygon } from 'react-native-svg';
 
-const WS_URL = 'ws://192.168.222.3:8000/ws';
+const WS_URL = 'ws://192.168.***.*:8000/ws';
 const ALARM_THRESHOLD = 70;
 
 type Box = {
