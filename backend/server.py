@@ -4,6 +4,7 @@ import requests
 import numpy as np
 import cv2
 import heapq
+import asyncio
 from PIL import Image, ImageOps
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
@@ -168,33 +169,41 @@ async def websocket_endpoint(websocket: WebSocket):
 
                 try:
                     img_bytes = base64.b64decode(payload.image)
-                    img_pil = Image.open(io.BytesIO(img_bytes))
-                    img_pil = ImageOps.exif_transpose(img_pil)
-                    img_pil = img_pil.convert("RGB")
-                    img_np = np.array(img_pil)
-                    img_cv2 = cv2.cvtColor(img_np, cv2.COLOR_RGB2BGR)
+
+                    # img_pil = Image.open(io.BytesIO(img_bytes))
+                    # img_pil = ImageOps.exif_transpose(img_pil)
+                    # img_pil = img_pil.convert("RGB")
+                    # img_np = np.array(img_pil)
+                    # img_cv2 = cv2.cvtColor(img_np, cv2.COLOR_RGB2BGR)
+                    nparr = np.frombuffer(img_bytes, np.uint8)
+                    img_cv2 = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
+
                     img_h, img_w = img_cv2.shape[:2]
                 except Exception as e:
                     await websocket.send_json({"status": "error", "message": f"影像處理錯誤: {str(e)}"})
                     continue
 
-                annotated_image, detected_items = VisionProcessor.detect_objects(img_cv2)
+                # [並行處理]
+                # 將 YOLO 模型推論與傳統 CV 斑馬線辨識丟入不同執行緒同時運算
+                task_yolo = asyncio.to_thread(VisionProcessor.detect_objects, img_cv2.copy())
+                task_lane = asyncio.to_thread(VisionProcessor.detect_lanes, img_cv2.copy())
 
-                # 斑馬線偵測，同時取得座標
-                lane_data = {"zebra": [], "sidewalk": [], "img_w": img_w, "img_h": img_h}
-                try:
-                    annotated_image, lane_data = VisionProcessor.detect_lanes(annotated_image)
-                except Exception as e:
-                    print(f"斑馬線/人行道辨識發生錯誤: {e}")
+                # 等待兩個影像處理任務同時完成
+                (yolo_annotated, detected_items), (lane_annotated, lane_data) = await asyncio.gather(task_yolo, task_lane)
 
+                # 風險評估 (依賴 YOLO 結果，已確認以距離與逼近速度為主)
                 analyzed_items, alert_queue = RiskEvaluator.evaluate_frame_risk(
                     detected_items, img_w, img_h, session_tracking_history, mode="pedestrian"
                 )
 
                 boxes = []
+                # 以畫好斑馬線與人行道的 lane_annotated 作為最終影像的底圖
+                final_image = lane_annotated.copy()
+
                 for item in analyzed_items:
                     label_en = VisionProcessor.get_label_name(item["class_id"])
 
+                    # 針對號誌進行二次辨識
                     light_status = -1
                     if label_en.lower() in ["traffic light", "pedestrian light"]:
                         try:
@@ -229,7 +238,24 @@ async def websocket_endpoint(websocket: WebSocket):
                         "specific_sign_name": specific_sign_name,
                     })
 
-                _, buffer = cv2.imencode('.jpg', annotated_image)
+                    # 將 YOLO 偵測到的框，根據危險程度動態畫回 final_image
+                    x1, y1, x2, y2 = map(int, item["bbox"])
+                    danger = item.get("danger_level", "低")
+
+                    if danger == "高":
+                        color = (0, 0, 255)   # 紅色 (高危險)
+                    elif danger == "中":
+                        color = (0, 165, 255) # 橘色 (中危險)
+                    else:
+                        color = (0, 255, 0)   # 綠色 (低危險)
+
+                    cv2.rectangle(final_image, (x1, y1), (x2, y2), color, 2)
+                    # (選用) 將中文標籤繪製於圖上：
+                    # display_label = LABEL_ZH.get(label_en, label_en)
+                    # cv2.putText(final_image, display_label, (x1, max(15, y1 - 10)), cv2.FONT_HERSHEY_SIMPLEX, 0.6, color, 2)
+
+                # 將合成好的最終影像轉回 Base64
+                _, buffer = cv2.imencode('.jpg', final_image)
                 processed_image_b64 = base64.b64encode(buffer).decode('utf-8')
 
                 await websocket.send_json({

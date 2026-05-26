@@ -245,7 +245,7 @@ class VisionProcessor:
             verbose=False
         )
 
-        annotated_image = results[0].plot()
+        annotated_image = image.copy()
         detected_items = []
 
         if results[0].boxes is not None:
@@ -322,7 +322,7 @@ class VisionProcessor:
                     top_y, bottom_y = h * 0.30, h * 1.0
                     top_width, bottom_width = w * 0.20, w * 0.95
             else:
-                top_y, bottom_y = h * 0.30, h * 1.0
+                top_y, bottom_y = h * 0.50, h * 1.0
                 top_width, bottom_width = w * 0.35, w * 0.95
             src = np.float32([
                 [center_x - bottom_width / 2, bottom_y],
@@ -414,24 +414,15 @@ class VisionProcessor:
         zebra_real_mask = cv2.warpPerspective(zebra_warped_mask, Minv, img_size)
 
         overlay = np.zeros_like(undist_img)
-        overlay[zebra_real_mask > 0] = [255, 0, 0]
-        overlay[green_mask > 0] = [0, 255, 0]
-
-        alpha = 1.0
-        beta = 0.65
-        weighted_img = cv2.addWeighted(undist_img, alpha, overlay, beta, 0)
 
         zebra_contours, _ = cv2.findContours(zebra_real_mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
         green_contours, _ = cv2.findContours(green_mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
 
-        cv2.drawContours(weighted_img, zebra_contours, -1, [255, 255, 255], 4)
-        cv2.drawContours(weighted_img, green_contours, -1, [255, 255, 255], 4)
-
-        # 回傳圖片 + 座標供前端疊加
+        # 轉換座標格式供前端 SVG 使用
         zebra_coords = [cnt.reshape(-1, 2).tolist() for cnt in zebra_contours]
         green_coords = [cnt.reshape(-1, 2).tolist() for cnt in green_contours]
 
-        return weighted_img, {
+        return undist_img, {
             "zebra": zebra_coords,
             "sidewalk": green_coords,
             "img_w": img_size[0],

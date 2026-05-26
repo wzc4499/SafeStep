@@ -8,7 +8,7 @@ import * as Location from 'expo-location';
 import { useLocalSearchParams, useRouter, Stack } from 'expo-router';
 import Svg, { Polygon } from 'react-native-svg';
 
-const WS_URL = 'ws://192.168.8.200:8000/ws';
+const WS_URL = 'ws://192.168.222.3:8000/ws';
 const ALARM_THRESHOLD = 70;
 
 type Box = {
@@ -178,7 +178,7 @@ export default function Detect() {
         console.error('傳輸失敗', err);
         isCapturing.current = false;
       }
-    }, isPedestrian ? 500 : 1500);
+    }, isPedestrian ? 300 : 1500);
   };
 
   const stopDetection = () => {
@@ -245,24 +245,24 @@ export default function Detect() {
               width={viewSize.w}
               height={viewSize.h}
             >
-              {/* 斑馬線：紅色半透明 */}
+              {/* 斑馬線：改為亮黃色、高不透明度 (0.85)、加粗邊框 (低視能友善) */}
               {lanes.zebra.map((contour, i) => (
                 <Polygon
                   key={`zebra-${i}`}
                   points={toSvgPoints(contour, lanes.img_w, lanes.img_h, viewSize.w, viewSize.h)}
-                  fill="rgba(255, 50, 50, 0.35)"
-                  stroke="white"
-                  strokeWidth="2"
+                  fill="rgba(255, 255, 0, 0.85)"
+                  stroke="rgba(255, 255, 255, 1)"
+                  strokeWidth="6"
                 />
               ))}
-              {/* 人行道：綠色半透明 */}
+              {/* 人行道：改為螢光綠、高不透明度 (0.85)、加粗邊框 (低視能友善) */}
               {lanes.sidewalk.map((contour, i) => (
                 <Polygon
                   key={`sidewalk-${i}`}
                   points={toSvgPoints(contour, lanes.img_w, lanes.img_h, viewSize.w, viewSize.h)}
-                  fill="rgba(50, 255, 50, 0.25)"
-                  stroke="white"
-                  strokeWidth="2"
+                  fill="rgba(100, 255, 100, 0.85)"
+                  stroke="rgba(255, 255, 255, 1)"
+                  strokeWidth="6"
                 />
               ))}
             </Svg>
