@@ -17,8 +17,7 @@ from PIL import Image
 
 # 流程控制 (輔助邏輯系統) --------------------------------------------------------
 class RiskEvaluator:
-    # 基礎危險權重 (拉到類別層級，避免每幀重複建立)
-    # 根據物件的物理特性或威脅程度給予預設分數
+    # 基礎危險權重
     BASE_RISK_SCORES = {
         1: 20,  # 行人
         2: 15,  # 機車
@@ -27,39 +26,43 @@ class RiskEvaluator:
         5: 18,  # 大貨車
         6: 18,  # 公車
         0: 10,  # 障礙物
-        7: 0    # 交通號誌 (靜態物件通常沒有直接碰撞危險)
+        7: 0    # 交通號誌
     }
 
-    # 定義「會動的車輛」類別 ID (對應 YOLO 的 COCO 資料集)
-    VEHICLE_CLASSES = {2, 3, 4, 5, 6} # 機車、汽車、小貨車、大貨車、公車
-
-    # 警報閾值設定 (當總危險分數大於此值時觸發警告)
+    VEHICLE_CLASSES = {2, 3, 4, 5, 6}
     ALERT_THRESHOLD = 70.0
 
     @staticmethod
-    # -- 計算物件物件距離 (相對逼近速度) --
-    def calculate_relative_speed(track_id, current_y2, history_dict):
-        """計算像素移動速度"""
-        # 若為尚未追蹤的新物件，記錄當前 Y 座標並回傳速度為 0
+    def calculate_kinematics(track_id, current_y2, current_area, current_xc, history_dict):
+        """計算物件的運動學特徵：Y軸速度、面積膨脹率、X軸位移"""
+        # 若為尚未追蹤的新物件，記錄初始狀態並回傳 0
         if track_id == -1 or track_id not in history_dict:
-            history_dict[track_id] = current_y2
-            return 0.0
+            history_dict[track_id] = {"y2": current_y2, "area": current_area, "xc": current_xc}
+            return 0.0, 0.0, 0.0
 
-        # 計算當前幀與上一幀的 Y 座標差異，正值代表往下移 (靠近相機)
-        prev_y2 = history_dict[track_id]
-        delta_y = current_y2 - prev_y2
-        history_dict[track_id] = current_y2
+        prev = history_dict[track_id]
 
-        # 將位移量等比例縮小當作相對速度指標
-        return delta_y / 10.0
+        # 1. Y軸逼近速度 (正值代表往下移，靠近相機)
+        delta_y = current_y2 - prev["y2"]
+
+        # 2. 面積膨脹率 (正值代表變大，越靠近膨脹越快)
+        # 加上 1e-5 避免除以 0
+        delta_area_ratio = (current_area - prev["area"]) / (prev["area"] + 1e-5)
+
+        # 3. X軸橫向位移
+        delta_xc = current_xc - prev["xc"]
+
+        # 更新歷史紀錄
+        history_dict[track_id] = {"y2": current_y2, "area": current_area, "xc": current_xc}
+
+        return delta_y, delta_area_ratio, delta_xc
 
     @staticmethod
-    # -- 危險性評估 --
     def evaluate_frame_risk(detected_items, image_width, image_height, history_dict, mode="pedestrian"):
         """處理單幀所有物件，計算危險度並回傳排序後的列表與警報佇列"""
         analyzed_items = []
-        current_frame_ids = set() # 用於記錄當前畫面中出現的所有物件 ID
-        alert_queue = [] # 優先權佇列，存放超過閾值的高危險物件
+        current_frame_ids = set()
+        alert_queue = []
 
         for item in detected_items:
             track_id = item["track_id"]
@@ -68,9 +71,10 @@ class RiskEvaluator:
 
             current_frame_ids.add(track_id)
 
-            # --- 新增的面積比例與距離估算邏輯 (整合至此) ---
-            # 計算物件的 Bounding Box 面積與整體影像面積的比例
+            # 計算物理特徵
             box_area = (x2 - x1) * (y2 - y1)
+            xc = (x1 + x2) / 2.0  # Bounding box 的 X 中心點
+
             img_area = image_width * image_height
             area_ratio = box_area / img_area if img_area > 0 else 0
             danger_pct = round(area_ratio * 100, 1)
@@ -83,74 +87,70 @@ class RiskEvaluator:
             else:
                 danger_level = "低"
 
-            # 粗估距離：物件越大 (area_ratio 大)，估計距離越小。設定上限為 99.9。
-            estimated_distance = round(1.0 / (area_ratio + 0.01) * 0.5, 1)
-            estimated_distance = min(estimated_distance, 99.9)
+            estimated_distance = min(round(1.0 / (area_ratio + 0.01) * 0.5, 1), 99.9)
 
             item["danger_level"] = danger_level
             item["area_ratio"] = round(area_ratio, 4)
             item["danger_pct"] = danger_pct
             item["distance"] = estimated_distance
-            # ---------------------------------------------
 
-            # 主指標：物理動態評估 (滿分 80 分)
+            # 取出運動學變數
+            delta_y, delta_area_ratio, delta_xc = RiskEvaluator.calculate_kinematics(
+                track_id, y2, box_area, xc, history_dict
+            )
 
-            # [距離分數] 佔 50 分。越靠近畫面底部 (1.0)，分數越高。
-            # y2 是 Bounding Box 的底部邊界，越大代表越靠近畫面下方(即靠近使用者)
+            # --- 全新評估指標 (滿分 100 分) ---
+
+            # [1. 基礎距離分數] - 佔 30 分
+            # y2 越大代表越靠近畫面下方
             proximity = y2 / image_height
-            distance_score = proximity * 50.0
+            distance_score = proximity * 30.0
 
-            approach_speed = None
+            # [2. 碰撞軌跡分數 (X軸置中度)] - 佔 20 分
+            # 計算物件中心離畫面中線的距離比例 (0 代表正中央，1 代表在最邊緣)
+            center_offset = abs(xc - (image_width / 2.0)) / (image_width / 2.0)
+            # 越靠近中間，分數越高
+            trajectory_score = max(0.0, 1.0 - center_offset) * 20.0
+
+            # [3. 動態逼近與膨脹分數] - 佔 30 分
             speed_score = 0.0
+            approach_factor = 0.0
 
-            # 模式邏輯判斷：行人模式
-            if mode == "pedestrian":
-                if cls_id in RiskEvaluator.VEHICLE_CLASSES:
-                    # 辨識出會動的機車、車子，額外計算速度
-                    approach_speed = RiskEvaluator.calculate_relative_speed(track_id, y2, history_dict)
-
-                    if approach_speed < 0:
-                        # 物件正在遠離 (delta_y 為負)
-                        speed_score = 0.0
-                        distance_score *= 0.2  # 正在遠離的物件，其距離威脅度大幅降低 (打 2 折)
-                    else:
-                        # 逼近速度換算成分數，並設定上限為 30 分
-                        speed_score = min(approach_speed * 15.0, 30.0)
+            if mode in ["pedestrian", "motorcycle"] and cls_id in RiskEvaluator.VEHICLE_CLASSES:
+                # 判斷是否正在靠近 (Y往下掉 OR 面積變大)
+                if delta_y > 0 or delta_area_ratio > 0.02:
+                    # 結合 Y 軸速度與面積膨脹率 (面積膨脹為非線性，給予極大權重)
+                    # 膨脹率 0.1(增長10%) 就可能產生巨大的危險感
+                    approach_factor = (delta_y / 5.0) + (delta_area_ratio * 100.0)
+                    speed_score = min(approach_factor * 10.0, 30.0)
                 else:
-                    # 非車輛物件 (如行人、障礙物)，不計算逼近速度
-                    speed_score = 0.0
-            # 模式邏輯 : 機車模式
-            elif mode == "motorcycle":
-                approach_speed = RiskEvaluator.calculate_relative_speed(track_id, y2, history_dict)
-                if approach_speed < 0:
-                    speed_score = 0.0
+                    # 物件正在遠離，威脅度大幅降低
                     distance_score *= 0.2
-                else:
-                    speed_score = min(approach_speed * 15.0, 30.0)
+                    trajectory_score *= 0.2
 
-            # 副指標：物件類別加成 (滿分 20 分)
-            class_bonus = RiskEvaluator.BASE_RISK_SCORES.get(cls_id, 5) # 預設未知物件加 5 分
+            # 紀錄給前端參考的速度指標
+            item["speed"] = approach_factor
 
-            # 計算總分 (滿分 100 分) = 距離分 + 速度分 + 類別分
-            total_risk = distance_score + speed_score + class_bonus
+            # [4. 類別分數] - 佔 20 分
+            class_bonus = RiskEvaluator.BASE_RISK_SCORES.get(cls_id, 5)
 
+            # 總結算
+            total_risk = distance_score + trajectory_score + speed_score + class_bonus
             item["risk_score"] = total_risk
             item["proximity_pct"] = proximity * 100
-            item["speed"] = approach_speed
+
             analyzed_items.append(item)
 
-            # 若高於警報閾值，推入優先權佇列 (Max-Heap 實作，以負值存入)
-            # 因為 Python 內建的是 Min-Heap，所以加上負號可以將最大值推到頂端
             if total_risk >= RiskEvaluator.ALERT_THRESHOLD:
+                import heapq
                 heapq.heappush(alert_queue, (-total_risk, track_id, item))
 
-        # 【記憶體維護】清理已離開畫面的物件，避免 history_dict 無限膨脹
+        # 記憶體維護
         obsolete_ids = set(history_dict.keys()) - current_frame_ids
         for obs_id in obsolete_ids:
             if obs_id != -1:
                 del history_dict[obs_id]
 
-        # 依危險分數由高到低排序，讓前端可以優先處理最高危險的物件
         analyzed_items.sort(key=lambda x: x["risk_score"], reverse=True)
 
         return analyzed_items, alert_queue
