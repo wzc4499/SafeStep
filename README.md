@@ -88,6 +88,7 @@ uvicorn server:app --host 0.0.0.0 --port 8000
 ```bash
 cd MyVisionApp
 npx expo start
+npx expo start --dev-client
 ```
 
 用手機 Expo Go 掃 QR Code 開啟 App。
